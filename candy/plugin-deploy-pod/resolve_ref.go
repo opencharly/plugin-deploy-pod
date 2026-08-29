@@ -2,6 +2,8 @@ package deploypod
 
 import (
 	"context"
+	"fmt"
+	"os"
 
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/deploykit"
@@ -70,10 +72,21 @@ func deployKeyToBoxLocal(ctx context.Context, ex *sdk.Executor, dc *deploykit.Fl
 	// matching the former resolver's no-entry → "" outcome.
 	var pre spec.DeployPluginsConnectReply
 	if err := hostBuild(ctx, ex, deployPluginsConnectKind, spec.DeployPluginsConnectRequest{Path: box}, &pre); err != nil || pre.Dir == "" {
+		// A genuine transport/decode failure is NOT the same as "this project declares no
+		// entry", and silently conflating them is what made a spec/sdk pin skew between charly
+		// and this out-of-process plugin present as a bogus `image not found in local storage:
+		// <deploy-key>:<tag>` — a ref nothing ever built, because the box name had degraded to
+		// the deploy key. Name the cause at the moment it is known.
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: deploy-key %q box resolution: project connect failed (%v); falling back to the key as the box name. If this plugin's spec/sdk pins are behind charly's, that skew is the usual cause.\n", box, err)
+		}
 		return ""
 	}
 	uf, ok, err := loaderkit.LoadUnifiedViaExecutor(ctx, ex, pre.Dir)
 	if err != nil || !ok || uf == nil {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: deploy-key %q box resolution: loading the project at %s failed (%v); falling back to the key as the box name.\n", box, pre.Dir, err)
+		}
 		return ""
 	}
 	pc := deploykit.ProjectFleetConfig(uf)
