@@ -381,6 +381,9 @@ func podPrepareVenue(ctx context.Context, exec *sdk.Executor, p lifecycleParams)
 		if berr != nil {
 			return nil, berr
 		}
+		// The overlay build created a new image — invalidate the persistent
+		// image-list cache so the next status run re-fetches the fresh list.
+		kit.InvalidateImageCache()
 		resolvedImage = overlayRef
 	}
 
