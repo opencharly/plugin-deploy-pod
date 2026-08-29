@@ -5,6 +5,7 @@ import (
 
 	"github.com/opencharly/sdk/deploykit"
 	"github.com/opencharly/sdk/loaderkit"
+	specfleet "github.com/opencharly/spec/fleet"
 	"github.com/opencharly/spec/spec"
 )
 
@@ -38,7 +39,7 @@ func TestCandyByNameRemoteQualifiedKey(t *testing.T) {
 	// to bridge.
 	candies := map[string]deploykit.CandyModel{}
 	for _, c := range readers {
-		candies[spec.CandyMapKey(c)] = c
+		candies[specfleet.CandyMapKey(c)] = c
 	}
 	if _, bareKeyed := candies["marker"]; bareKeyed {
 		t.Fatal("setup is vacuous: the remote candy is bare-keyed, so the fallback under test is never exercised")
