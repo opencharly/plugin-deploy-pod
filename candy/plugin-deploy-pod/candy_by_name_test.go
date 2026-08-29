@@ -33,12 +33,17 @@ func TestCandyByNameRemoteQualifiedKey(t *testing.T) {
 		},
 	}, nil)
 
-	// Re-key exactly as the live overlay build does: CandyMapKey gives a REMOTE candy its
-	// fully-qualified ref and a LOCAL candy its bare name — the very divergence this lookup exists
-	// to bridge.
+	// Re-key exactly as the live overlay build does: a REMOTE candy gets its
+	// fully-qualified ref and a LOCAL candy its bare name — the very divergence
+	// this lookup exists to bridge. (The former spec.CandyMapKey helper was
+	// removed from the spec; the keying logic is inlined here.)
 	candies := map[string]deploykit.CandyModel{}
 	for _, c := range readers {
-		candies[spec.CandyMapKey(c)] = c
+		key := c.GetName()
+		if c.GetRemote() {
+			key = c.GetRepoPath() + "/" + c.GetSubPathPrefix() + c.GetName()
+		}
+		candies[key] = c
 	}
 	if _, bareKeyed := candies["marker"]; bareKeyed {
 		t.Fatal("setup is vacuous: the remote candy is bare-keyed, so the fallback under test is never exercised")
