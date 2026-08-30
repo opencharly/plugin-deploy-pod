@@ -2,7 +2,7 @@ module github.com/opencharly/plugin-deploy-pod/candy/plugin-deploy-pod
 
 go 1.26.4
 
-require github.com/opencharly/sdk v0.2026241.2117
+require github.com/opencharly/sdk v0.2026242.11
 
 require golang.org/x/crypto v0.52.0 // indirect
 
