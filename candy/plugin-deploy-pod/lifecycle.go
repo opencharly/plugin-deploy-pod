@@ -524,18 +524,18 @@ func podRebuild(ctx context.Context, exec *sdk.Executor, p lifecycleParams) (*pb
 		}
 	}
 	// A pinned --tag (the `charly update <name> --tag <tag>` flag) must reach the
-	// re-deploy's `fleet add` AND the `config` leg, or the no-tag resolution re-selects
+	// re-deploy's `deploy add` AND the `config` leg, or the no-tag resolution re-selects
 	// "newest local CalVer" — which, for a bed-run image tagged <bed>-<calver> (not a
 	// plain CalVer), falls to the lexical tiebreak and can pick a STALE cached image.
 	// The check-run's fresh-rebuild gate pins the per-run tag so it verifies the
 	// JUST-BUILT image, not an older one.
 	//
-	// The `config` leg is where the quadlet's Image line is rendered. `fleet add` alone
+	// The `config` leg is where the quadlet's Image line is rendered. `deploy add` alone
 	// is not enough: for a no-overlay deploy (no add_candy plans) prepareVenueState
 	// returns nil (resolvedImage == baseImage), so the resolved ref is NOT persisted to
 	// the per-host overlay, and a tag-less `config` re-resolves the base name to the
 	// newest local CalVer — the same stale-image trap. Both legs must pin the same tag.
-	addArgs := []string{"fleet", "add", p.Name}
+	addArgs := []string{"deploy", "add", p.Name}
 	if ropts.Tag != "" {
 		addArgs = append(addArgs, "--tag", ropts.Tag)
 	}
