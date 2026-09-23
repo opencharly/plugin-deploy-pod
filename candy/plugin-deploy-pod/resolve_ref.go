@@ -20,17 +20,17 @@ import (
 //   - the per-host deploy overlay via the EXISTING "pod-config-load-deploy" seam (loadDeploy → dc),
 //   - the PROJECT fallback via the shared loaderkit.LoadUnifiedViaExecutor helper + the
 //     "deploy-plugins-connect" seam's project dir (the SAME plugin-side loader path
-//     candy/plugin-fleet's resolveTreeViaLoader uses), and
+//     candy/plugin-deploy's resolveTreeViaLoader uses), and
 //   - kit.ResolveShellImageRef / kit.LocalImageExists (pure).
 // Byte-for-byte the former host resolvers' two-tier semantics: per-host Image (DeployKey then bare
-// key) → project Fleet[box].Image → the key itself; and the add_candy-overlay resolved_image
+// key) → project Deploy[box].Image → the key itself; and the add_candy-overlay resolved_image
 // preference over the base-name resolution (DeployKey then bare key), gated on the overlay image
 // actually existing locally.
 
 const deployPluginsConnectKind = "deploy-plugins-connect"
 
 // resolveDeployRefLocal is the plugin-side replacement for the former "pod-config-resolve-ref" host
-// seam. explicitRef (set only by `charly fleet from-box`) short-circuits both outputs, exactly as
+// seam. explicitRef (set only by `charly deploy from-box`) short-circuits both outputs, exactly as
 // the former seam did.
 func resolveDeployRefLocal(ctx context.Context, ex *sdk.Executor, box, instance, tag, explicitRef string) (deployBoxName, imageRef string, err error) {
 	if explicitRef != "" {
@@ -49,7 +49,7 @@ func resolveDeployRefLocal(ctx context.Context, ex *sdk.Executor, box, instance,
 
 // resolveDeployBoxNameLocal mirrors the former host box-name resolver: the deploy entry's declared
 // box (per-host then project), falling back to the key itself (the key==image convention).
-func resolveDeployBoxNameLocal(ctx context.Context, ex *sdk.Executor, dc *deploykit.FleetConfig, box, instance string) string {
+func resolveDeployBoxNameLocal(ctx context.Context, ex *sdk.Executor, dc *deploykit.DeployConfig, box, instance string) string {
 	if img := deployKeyToBoxLocal(ctx, ex, dc, box, instance); img != "" {
 		return img
 	}
@@ -59,7 +59,7 @@ func resolveDeployBoxNameLocal(ctx context.Context, ex *sdk.Executor, dc *deploy
 // projectConnect and loadUnifiedForBox are the two executor-backed legs of the project
 // fallback, held as vars so a test can drive their FAILURE branches — the branches that only
 // fire on a transport/decode fault and are therefore unreachable from a passing bed run. Same
-// seam idiom the sibling config_setup paths use (loadProjectVolume, saveFleet, mutateFleet).
+// seam idiom the sibling config_setup paths use (loadProjectVolume, saveDeploy, mutateDeploy).
 var (
 	projectConnect = func(ctx context.Context, ex *sdk.Executor, box string, pre *spec.DeployPluginsConnectReply) error {
 		return hostBuild(ctx, ex, deployPluginsConnectKind, spec.DeployPluginsConnectRequest{Path: box}, pre)
@@ -69,7 +69,7 @@ var (
 
 // deployKeyToBoxLocal mirrors the former host deploy-key→box loader-read: user (per-host) overlay
 // wins over the project config; each is tried DeployKey-then-bare-key.
-func deployKeyToBoxLocal(ctx context.Context, ex *sdk.Executor, dc *deploykit.FleetConfig, box, instance string) string {
+func deployKeyToBoxLocal(ctx context.Context, ex *sdk.Executor, dc *deploykit.DeployConfig, box, instance string) string {
 	if dc != nil {
 		if e, ok := dc.Lookup(box, instance); ok && e.Image != "" {
 			return e.Image
@@ -79,7 +79,7 @@ func deployKeyToBoxLocal(ctx context.Context, ex *sdk.Executor, dc *deploykit.Fl
 		}
 	}
 	// Project-level fallback — the loader-over-executor path (parity with the former host resolver's
-	// LoadUnified → ProjectFleetConfig). Degrades to "" (→ the key) on any connect/load failure,
+	// LoadUnified → ProjectDeployConfig). Degrades to "" (→ the key) on any connect/load failure,
 	// matching the former resolver's no-entry → "" outcome.
 	var pre spec.DeployPluginsConnectReply
 	if err := projectConnect(ctx, ex, box, &pre); err != nil || pre.Dir == "" {
@@ -100,11 +100,11 @@ func deployKeyToBoxLocal(ctx context.Context, ex *sdk.Executor, dc *deploykit.Fl
 		}
 		return ""
 	}
-	pc := deploykit.ProjectFleetConfig(uf)
+	pc := deploykit.ProjectDeployConfig(uf)
 	if pc == nil {
 		return ""
 	}
-	if e, ok := pc.Fleet[box]; ok && e.Image != "" {
+	if e, ok := pc.Deploy[box]; ok && e.Image != "" {
 		return e.Image
 	}
 	return ""
@@ -147,8 +147,8 @@ func qualifyImageRef(imageRef, registry, explicitRef, resolvedOverlay, boxName, 
 }
 
 // resolvedOverlayImage mirrors the former host resolved_image lookup: the concrete add_candy-overlay
-// image ref persisted per-host (FleetNode.ResolvedImage), DeployKey-then-bare-key.
-func resolvedOverlayImage(dc *deploykit.FleetConfig, box, instance string) string {
+// image ref persisted per-host (DeployNode.ResolvedImage), DeployKey-then-bare-key.
+func resolvedOverlayImage(dc *deploykit.DeployConfig, box, instance string) string {
 	if dc == nil {
 		return ""
 	}

@@ -12,15 +12,15 @@ import (
 
 // deploy_save_state.go — the #55 K4 config-write seam-collapse for plugin-deploy-pod: the deploy-state
 // WRITE runs PLUGIN-SIDE via deploykit.SaveDeployState directly, instead of over the deleted
-// "deploy-config-save-state" host seam. Mirrors candy/plugin-fleet's plugin-side write: Primaries come
-// from the GENERIC "loader-threaded" HostBuild leg (the SAME leg plugin-build/-fleet/-vm already call —
+// "deploy-config-save-state" host seam. Mirrors candy/plugin-deploy's plugin-side write: Primaries come
+// from the GENERIC "loader-threaded" HostBuild leg (the SAME leg plugin-build/-deploy/-vm already call —
 // no new seam), and the current-state re-read is the candy's own loadDeploy (the cycle-free
-// loaderkit.LoadHostFleetConfigViaExecutor read), so SaveDeployState no longer needs charly's DeployStateHost registration.
+// loaderkit.LoadHostDeployConfigViaExecutor read), so SaveDeployState no longer needs charly's DeployStateHost registration.
 
 // fetchLoaderPrimaries returns the loader-threaded Primaries DATA snapshot (plugin-verb WORD →
 // scalar-sugar primary field) via the generic "loader-threaded" host builder — the SAME map
 // candy/plugin-build's resolve fills spec.ResolvedProject.Primaries from. The node-form marshal
-// (deploykit.MarshalFleetNode) resugars each plan step with it. A HostBuild failure degrades to
+// (deploykit.MarshalDeployNode) resugars each plan step with it. A HostBuild failure degrades to
 // an empty map (a plan with no plugin-verb sugar marshals identically).
 func fetchLoaderPrimaries(ctx context.Context, ex *sdk.Executor) map[string]string {
 	out, err := ex.HostBuild(ctx, "loader-threaded", nil)
@@ -34,25 +34,25 @@ func fetchLoaderPrimaries(ctx context.Context, ex *sdk.Executor) map[string]stri
 	return t.Primaries
 }
 
-// deployMarshalNode builds the per-entry node-form marshal callback deploykit.SaveFleetConfig /
+// deployMarshalNode builds the per-entry node-form marshal callback deploykit.SaveDeployConfig /
 // SaveDeployState / CleanDeployEntry take. It resugars each plan step via the loader-threaded
 // Primaries snapshot (fetchLoaderPrimaries) — the SAME registry-derived D-fact the deleted host
-// deploy-config-save leg fed to deploykit.MarshalFleetNode via loaderThreaded().Primaries.
+// deploy-config-save leg fed to deploykit.MarshalDeployNode via loaderThreaded().Primaries.
 // Sourcing Primaries PLUGIN-SIDE is what lets the deploy-state WRITE run here instead of over a
 // host seam (#55 coneC-dsh — the pod-config-* seams collapse plugin-side).
-func deployMarshalNode(ctx context.Context, ex *sdk.Executor) func(name string, node *deploykit.FleetNode) (*yaml.Node, error) {
+func deployMarshalNode(ctx context.Context, ex *sdk.Executor) func(name string, node *deploykit.DeployNode) (*yaml.Node, error) {
 	primaries := fetchLoaderPrimaries(ctx, ex)
-	return func(_ string, node *deploykit.FleetNode) (*yaml.Node, error) {
-		return deploykit.MarshalFleetNode(node, primaries)
+	return func(_ string, node *deploykit.DeployNode) (*yaml.Node, error) {
+		return deploykit.MarshalDeployNode(node, primaries)
 	}
 }
 
-// deployConfigReader is the loader-backed reader callback deploykit.SaveFleetConfig /
+// deployConfigReader is the loader-backed reader callback deploykit.SaveDeployConfig /
 // CleanDeployEntry / SaveVmDeployState take for their load-mutate-save + failsafe re-check — the
-// cycle-free loaderkit.LoadHostFleetConfigViaExecutor read, so the write no longer depends on the
+// cycle-free loaderkit.LoadHostDeployConfigViaExecutor read, so the write no longer depends on the
 // charly-init DeployStateHost package var (#55 coneC-dsh).
-func deployConfigReader(ctx context.Context, ex *sdk.Executor) func() (*deploykit.FleetConfig, error) {
-	return func() (*deploykit.FleetConfig, error) { return loadDeploy(ctx, ex, "deploy-write") }
+func deployConfigReader(ctx context.Context, ex *sdk.Executor) func() (*deploykit.DeployConfig, error) {
+	return func() (*deploykit.DeployConfig, error) { return loadDeploy(ctx, ex, "deploy-write") }
 }
 
 // deploySaveState persists a SaveDeployStateInput to the per-host deploy overlay PLUGIN-SIDE. The
@@ -62,6 +62,6 @@ func deployConfigReader(ctx context.Context, ex *sdk.Executor) func() (*deployki
 // replaces (the deleted seam returned nil on success too).
 func deploySaveState(ctx context.Context, ex *sdk.Executor, box, instance string, input spec.SaveDeployStateInput) {
 	marshalNode := deployMarshalNode(ctx, ex)
-	reader := func() (*deploykit.FleetConfig, error) { return loadDeploy(ctx, ex, "deploy-save-state") }
+	reader := func() (*deploykit.DeployConfig, error) { return loadDeploy(ctx, ex, "deploy-save-state") }
 	deploykit.SaveDeployState(box, instance, input, marshalNode, reader)
 }

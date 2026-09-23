@@ -88,7 +88,7 @@ func TestDeployKeyToBoxLocal_LoadFailureIsNamed(t *testing.T) {
 }
 
 // A leg that simply reports "no entry" must stay SILENT — otherwise every ordinary
-// project without a fleet entry would start emitting warnings.
+// project without a deploy entry would start emitting warnings.
 func TestDeployKeyToBoxLocal_NoEntryStaysSilent(t *testing.T) {
 	origConnect := projectConnect
 	t.Cleanup(func() { projectConnect = origConnect })

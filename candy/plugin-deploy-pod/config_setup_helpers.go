@@ -234,15 +234,15 @@ func parseVolumeEnv(boxName string) []spec.DeployVolume {
 }
 
 // persistResourceCaps mirrors the former BoxConfigSetupCmd.persistResourceCaps: mutates the
-// (already plugin-loaded) dc in place and re-saves it via the save-fleet seam iff any resource
+// (already plugin-loaded) dc in place and re-saves it via the save-deploy seam iff any resource
 // flag was set.
-func persistResourceCaps(ctx context.Context, ex *sdk.Executor, dc **deploykit.FleetConfig, c *spec.PodConfigSetupRequest) error {
+func persistResourceCaps(ctx context.Context, ex *sdk.Executor, dc **deploykit.DeployConfig, c *spec.PodConfigSetupRequest) error {
 	if c.MemoryMax == "" && c.MemoryHigh == "" && c.MemorySwapMax == "" && c.Cpus == "" {
 		return nil
 	}
 	key := spec.DeployKey(c.Box, c.Instance)
-	fresh, err := mutateFleet(ctx, ex, "charly config resource-caps", func(d *deploykit.FleetConfig) (bool, error) {
-		entry := d.Fleet[key]
+	fresh, err := mutateDeploy(ctx, ex, "charly config resource-caps", func(d *deploykit.DeployConfig) (bool, error) {
+		entry := d.Deploy[key]
 		if entry.Security == nil {
 			entry.Security = &spec.SecurityConfig{}
 		}
@@ -258,7 +258,7 @@ func persistResourceCaps(ctx context.Context, ex *sdk.Executor, dc **deploykit.F
 		if c.Cpus != "" {
 			entry.Security.Cpus = c.Cpus
 		}
-		d.Fleet[key] = entry
+		d.Deploy[key] = entry
 		return true, nil
 	})
 	if err != nil {
@@ -268,10 +268,10 @@ func persistResourceCaps(ctx context.Context, ex *sdk.Executor, dc **deploykit.F
 	return nil
 }
 
-// resolveDeployPorts self-heals a nil/absent overlay (dc / dc.Fleet) exactly like
+// resolveDeployPorts self-heals a nil/absent overlay (dc / dc.Deploy) exactly like
 // persistResourceCaps above, then resolves and persists this deploy's ports via
 // kit.ResolveDeployPorts. Extracted from runConfig (config_setup.go) for direct unit testing —
-// task #19's regression: the pre-fix code guarded this block on `dc != nil && dc.Fleet != nil`
+// task #19's regression: the pre-fix code guarded this block on `dc != nil && dc.Deploy != nil`
 // and SKIPPED port resolution entirely whenever no per-host overlay existed yet, which is exactly
 // the state of a fresh disposable check bed's XDG-isolated environment on its first-ever `charly
 // config`. With resolution skipped, meta.Port kept the image label's bare container ports, which
@@ -281,19 +281,19 @@ func persistResourceCaps(ctx context.Context, ex *sdk.Executor, dc **deploykit.F
 // on their first config, contradicting the documented contract
 // (plugins/core/skills/deploy/SKILL.md "Auto port mapping": port resolution runs
 // unconditionally at `charly config`, auto-allocating a free host port per inherited container
-// port unless pinned). Self-healing dc/dc.Fleet here — instead of skipping — makes port
+// port unless pinned). Self-healing dc/dc.Deploy here — instead of skipping — makes port
 // resolution (and, as a side effect, every other per-deploy overlay merge downstream in
-// MergeDeployOntoMetadata, which shares the same dc.Fleet-nil guard) run correctly on a bed's
+// MergeDeployOntoMetadata, which shares the same dc.Deploy-nil guard) run correctly on a bed's
 // very first config, matching every subsequent config/update.
-func resolveDeployPorts(ctx context.Context, ex *sdk.Executor, dc **deploykit.FleetConfig, key string, meta *spec.BoxMetadata) error {
+func resolveDeployPorts(ctx context.Context, ex *sdk.Executor, dc **deploykit.DeployConfig, key string, meta *spec.BoxMetadata) error {
 	containerPorts := kit.ContainerPortsFromMappings(meta.Port)
 	var resolved []string
 	// The ALLOCATION runs inside the locked cycle, against a freshly-read overlay — not just the
 	// write. kit.ResolveDeployPorts picks free host ports against OccupiedHostPorts(dc, key), so
 	// resolving against the caller's minutes-old snapshot would hand two concurrently-configuring
 	// beds the same host port even though the file write itself is serialized.
-	fresh, err := mutateFleet(ctx, ex, "charly config resolve-ports", func(d *deploykit.FleetConfig) (bool, error) {
-		overlay := d.Fleet[key]
+	fresh, err := mutateDeploy(ctx, ex, "charly config resolve-ports", func(d *deploykit.DeployConfig) (bool, error) {
+		overlay := d.Deploy[key]
 		if len(containerPorts) == 0 && len(overlay.Port) == 0 {
 			return false, nil
 		}
@@ -305,7 +305,7 @@ func resolveDeployPorts(ctx context.Context, ex *sdk.Executor, dc **deploykit.Fl
 			return false, nil
 		}
 		overlay.ResolvedPort = picked
-		d.Fleet[key] = overlay
+		d.Deploy[key] = overlay
 		resolved = picked
 		return true, nil
 	})
@@ -321,7 +321,7 @@ func resolveDeployPorts(ctx context.Context, ex *sdk.Executor, dc **deploykit.Fl
 
 // loadProjectVolume resolves the deploy's PROJECT-declared `volume:` override — the entity as
 // authored in the PROJECT's own charly.yml (e.g. a disposable check bed's `volume: [{name:
-// enc-data, type: encrypted}]`) — which the per-host overlay `loadDeploy` reads (LoadFleetConfig,
+// enc-data, type: encrypted}]`) — which the per-host overlay `loadDeploy` reads (LoadDeployConfig,
 // ~/.config/charly/charly.yml) never carries on its own. Resolved PLUGIN-SIDE (#55 Cone A Unit 3a):
 // the former "pod-config-project-volume" host seam (which re-loaded the merged tree via the core
 // the former host merged-tree read) is DELETED — this reads the SAME merged project+operator tree itself via
@@ -355,13 +355,13 @@ var loadProjectVolume = func(ctx context.Context, ex *sdk.Executor, box, instanc
 // VolumeProjectChecked=true — the project consult happened THIS call, regardless of outcome — so
 // resolveDeployVolumes never repeats it (see that function's doc for why this bit must be
 // distinct from "the overlay entry exists").
-func persistDeployVolumes(ctx context.Context, ex *sdk.Executor, dc **deploykit.FleetConfig, c *spec.PodConfigSetupRequest, volumes []spec.DeployVolume) error {
+func persistDeployVolumes(ctx context.Context, ex *sdk.Executor, dc **deploykit.DeployConfig, c *spec.PodConfigSetupRequest, volumes []spec.DeployVolume) error {
 	key := spec.DeployKey(c.Box, c.Instance)
-	fresh, err := mutateFleet(ctx, ex, "charly config persist-volumes", func(d *deploykit.FleetConfig) (bool, error) {
-		entry := d.Fleet[key]
+	fresh, err := mutateDeploy(ctx, ex, "charly config persist-volumes", func(d *deploykit.DeployConfig) (bool, error) {
+		entry := d.Deploy[key]
 		entry.Volume = volumes
 		entry.VolumeProjectChecked = true
-		d.Fleet[key] = entry
+		d.Deploy[key] = entry
 		return true, nil
 	})
 	if err != nil {
@@ -398,7 +398,7 @@ func persistDeployVolumes(ctx context.Context, ex *sdk.Executor, dc **deploykit.
 // VolumeProjectChecked is the one bit that distinguishes them, set unconditionally by
 // persistDeployVolumes below on every project consult regardless of its result — mirroring
 // resolved_port/resolved_image's "charly-written state, never authored" pattern (R3, same shape).
-func resolveDeployVolumes(ctx context.Context, ex *sdk.Executor, c *spec.PodConfigSetupRequest, dc **deploykit.FleetConfig) ([]spec.DeployVolume, error) {
+func resolveDeployVolumes(ctx context.Context, ex *sdk.Executor, c *spec.PodConfigSetupRequest, dc **deploykit.DeployConfig) ([]spec.DeployVolume, error) {
 	deployVolumes := parseVolumeFlags(c)
 	if len(deployVolumes) == 0 {
 		deployVolumes = parseVolumeEnv(c.Box)
@@ -407,7 +407,7 @@ func resolveDeployVolumes(ctx context.Context, ex *sdk.Executor, c *spec.PodConf
 		return deployVolumes, nil
 	}
 	if *dc != nil {
-		if overlay, ok := (*dc).Fleet[spec.DeployKey(c.Box, c.Instance)]; ok && overlay.VolumeProjectChecked {
+		if overlay, ok := (*dc).Deploy[spec.DeployKey(c.Box, c.Instance)]; ok && overlay.VolumeProjectChecked {
 			// The project has already been consulted once for this key: the overlay is
 			// authoritative, whether or not it carries a volume. Never re-consult the
 			// project on this path (the round-2 perf/correctness regression this bit closes).
@@ -581,13 +581,13 @@ func podConfigWriteSelf(r spec.PodConfigWriteRequest) (spec.PodConfigWriteReply,
 }
 
 // provisionData mirrors the former BoxConfigSetupCmd.runConfig's data-provisioning block.
-func provisionData(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, c *spec.PodConfigSetupRequest, meta *spec.BoxMetadata, imageRef string, dc *deploykit.FleetConfig, bindMounts []deploykit.ResolvedBindMount, volumes []deploykit.VolumeMount, deployVolumes []spec.DeployVolume) error {
+func provisionData(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, c *spec.PodConfigSetupRequest, meta *spec.BoxMetadata, imageRef string, dc *deploykit.DeployConfig, bindMounts []deploykit.ResolvedBindMount, volumes []deploykit.VolumeMount, deployVolumes []spec.DeployVolume) error {
 	dataMeta := meta
 	dataRef := imageRef
 	dataEngine := rt.RunEngine
 	if dc != nil {
 		if entry, ok := dc.Lookup(c.Box, c.Instance); ok && entry.Engine != "" {
-			dataEngine = entry.Engine
+			dataEngine = string(entry.Engine)
 		}
 	}
 
@@ -640,8 +640,8 @@ func provisionData(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntim
 	// Data provisioning is the LONGEST gap in the whole config run — it copies volume payloads out
 	// of the image — so its seeded-state write must land on a re-read overlay, never on the dc this
 	// function was handed before the copy started.
-	if _, err := mutateFleet(ctx, ex, "charly config data-seeded", func(d *deploykit.FleetConfig) (bool, error) {
-		imgDeploy := d.Fleet[key]
+	if _, err := mutateDeploy(ctx, ex, "charly config data-seeded", func(d *deploykit.DeployConfig) (bool, error) {
+		imgDeploy := d.Deploy[key]
 		for i := range imgDeploy.Volume {
 			for _, entry := range dataMeta.DataEntries {
 				if imgDeploy.Volume[i].Name == entry.Volume {
@@ -650,7 +650,7 @@ func provisionData(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntim
 				}
 			}
 		}
-		d.Fleet[key] = imgDeploy
+		d.Deploy[key] = imgDeploy
 		return true, nil
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not save data seeded state to charly.yml: %v\n", err)
@@ -666,17 +666,17 @@ func provisionData(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntim
 // c.HostEnvJSON) — never re-derived here via os.Executable(), which would resolve to the PLUGIN
 // binary for this out-of-process placement (the same bug class documented on resolveHostCharlyBin).
 func updateAllDeployedQuadlets(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, skipBox string, charlyBin string) error {
-	// loaderkit.LoadHostFleetConfigViaExecutor (#55 coneC Unit C2 — this retired the former
-	// host fleet-config loader-seam round-trip): the cycle-free plugin-side overlay
-	// read, byte-identical to the 8 sibling rewires (plugin-fleet/ephemeral, plugin-pod/enc_cmd,
+	// loaderkit.LoadHostDeployConfigViaExecutor (#55 coneC Unit C2 — this retired the former
+	// host deploy-config loader-seam round-trip): the cycle-free plugin-side overlay
+	// read, byte-identical to the 8 sibling rewires (plugin-deploy/ephemeral, plugin-pod/enc_cmd,
 	// plugin-pod/remove_orchestration, plugin-status/nested_tree, plugin-substrate/status_flat).
-	dc, err := loaderkit.LoadHostFleetConfigViaExecutor(ctx, ex)
+	dc, err := loaderkit.LoadHostDeployConfigViaExecutor(ctx, ex)
 	if err != nil || dc == nil {
 		return nil
 	}
 
-	keys := make([]string, 0, len(dc.Fleet))
-	for key := range dc.Fleet {
+	keys := make([]string, 0, len(dc.Deploy))
+	for key := range dc.Deploy {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
@@ -732,14 +732,14 @@ func updateAllDeployedQuadlets(ctx context.Context, ex *sdk.Executor, rt *kit.Re
 
 		var deployVolumes []spec.DeployVolume
 		var deploySidecarsRaw map[string]json.RawMessage
-		if overlay, ok := dc.Fleet[key]; ok {
+		if overlay, ok := dc.Deploy[key]; ok {
 			deployVolumes = overlay.Volume
 			deploySidecarsRaw = overlay.Sidecar
 		}
 		volumes, bindMounts := deploykit.ResolveVolumeBacking(boxName, instance, meta.Volume, deployVolumes, meta.Home, rt.EncryptedStoragePath, rt.VolumesPath)
 
 		var quadletEnvFile string
-		if overlay, ok := dc.Fleet[key]; ok && overlay.EnvFile != "" {
+		if overlay, ok := dc.Deploy[key]; ok && overlay.EnvFile != "" {
 			quadletEnvFile = kit.ExpandHostHome(overlay.EnvFile)
 		}
 		if quadletEnvFile == "" {
@@ -881,7 +881,7 @@ func runHook(engine, containerName, hookScript string, envVars []string) error {
 }
 
 // prepareQuadletEnv mirrors the former BoxConfigSetupCmd.prepareQuadletEnv.
-func prepareQuadletEnv(c *spec.PodConfigSetupRequest, dc *deploykit.FleetConfig, bindMounts []deploykit.ResolvedBindMount) string {
+func prepareQuadletEnv(c *spec.PodConfigSetupRequest, dc *deploykit.DeployConfig, bindMounts []deploykit.ResolvedBindMount) string {
 	var quadletEnvFile string
 	if c.EnvFile != "" {
 		if abs, err := filepath.Abs(c.EnvFile); err == nil {
@@ -889,7 +889,7 @@ func prepareQuadletEnv(c *spec.PodConfigSetupRequest, dc *deploykit.FleetConfig,
 		}
 	}
 	if quadletEnvFile == "" && dc != nil {
-		if overlay, ok := dc.Fleet[spec.DeployKey(c.Box, c.Instance)]; ok && overlay.EnvFile != "" {
+		if overlay, ok := dc.Deploy[spec.DeployKey(c.Box, c.Instance)]; ok && overlay.EnvFile != "" {
 			quadletEnvFile = kit.ExpandHostHome(overlay.EnvFile)
 		}
 	}
