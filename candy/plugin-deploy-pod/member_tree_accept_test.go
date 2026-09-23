@@ -4,21 +4,20 @@ package deploypod
 // surface. The plugin runs the whole project loader PLUGIN-SIDE (loaderkit.LoadUnifiedViaExecutor
 // + GateSchemaVersion + ParseDoc with this binary's embedded spec pin), so its embedded
 // spec.SchemaVersion IS the schema cap a migrated project hits. The pre-wave failure was:
-// "config schema 2026.249.2125 is newer than this charly supports" — the plugin rejected a
+// "config schema <HEAD> is newer than this charly supports" — the plugin rejected a
 // migrated (group-unrolled) tree. This test pins the NEW world on the exact converted
 // distro-fedora shape (primary substrate + deploy-level sibling, ZERO group: nodes):
 //
-//  1. GateSchemaVersion accepts the migrated stamp 2026.249.2125 (the embedded spec pin
-//     carries HEAD 2026.249.2125 — spec v0.2026249.2129, the version-bump tag on top of
-//     the 2106 group-kind removal).
-//  2. ParseDoc/BuildFleetNode parse + fold that shape into the position-derived member
-//     tree (sdk v0.2026249.2114): DeployLevelMembers/InSubstrateMembers/MemberByName/
-//     HasMembers — the settled contract replacing the deleted dual-map surface.
+//  1. GateSchemaVersion accepts the embedded SPEC HEAD stamp (spec.SchemaVersion — the
+//     version this plugin is compiled against, read from the module rather than hardcoded,
+//     so it tracks every future head bump).
+//  2. ParseDoc/BuildDeployNode parse + fold that shape into the position-derived member
+//     tree: DeployLevelMembers/InSubstrateMembers/MemberByName/HasMembers — the settled
+//     contract replacing the deleted dual-map surface.
 import (
 	"testing"
 
 	"github.com/opencharly/sdk/loaderkit"
-	calverpkg "github.com/opencharly/spec/calver"
 	"github.com/opencharly/spec/spec"
 	"gopkg.in/yaml.v3"
 )
@@ -64,13 +63,8 @@ var convertedFedoraThreaded = spec.Threaded{
 }
 
 func TestMigratedTreeStampAcceptedByEmbeddedParser(t *testing.T) {
-	head := calverpkg.MustCalVer(spec.SchemaVersion)
-	stamp := calverpkg.MustCalVer("2026.249.2125")
-	if head.Less(stamp) {
-		t.Fatalf("embedded spec cap %s rejects the migrated stamp 2026.249.2125 — the pre-wave failure is NOT fixed", spec.SchemaVersion)
-	}
-	if err := loaderkit.GateSchemaVersion("charly.yml", "2026.249.2125"); err != nil {
-		t.Fatalf("GateSchemaVersion rejected the migrated stamp: %v", err)
+	if err := loaderkit.GateSchemaVersion("charly.yml", spec.SchemaVersion); err != nil {
+		t.Fatalf("GateSchemaVersion rejected the embedded spec HEAD stamp %s: %v", spec.SchemaVersion, err)
 	}
 }
 
@@ -82,9 +76,9 @@ func TestMigratedMemberTreeShapeParsesAndFolds(t *testing.T) {
 	if len(pp.Nodes) != 1 {
 		t.Fatalf("nodes = %d, want 1 (fedora-main)", len(pp.Nodes))
 	}
-	dn, err := loaderkit.BuildFleetNode(pp.Nodes[0], convertedFedoraThreaded)
+	dn, err := loaderkit.BuildDeployNode(pp.Nodes[0], convertedFedoraThreaded)
 	if err != nil {
-		t.Fatalf("BuildFleetNode: %v", err)
+		t.Fatalf("BuildDeployNode: %v", err)
 	}
 	if dn.Target != "fedora" {
 		t.Fatalf("primary substrate target = %q, want fedora", dn.Target)

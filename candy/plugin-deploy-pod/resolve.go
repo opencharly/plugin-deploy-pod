@@ -84,7 +84,7 @@ func boxEngineForDeploy(ctx context.Context, ex *sdk.Executor, box, instance, gl
 	}
 	if dc != nil {
 		if entry, ok := dc.Lookup(box, instance); ok && entry.Engine != "" {
-			return entry.Engine, nil
+			return string(entry.Engine), nil
 		}
 	}
 	return globalEngine, nil
@@ -98,7 +98,7 @@ type podRuntimeImage struct {
 	engine     string
 	imageRef   string
 	meta       *spec.BoxMetadata
-	dc         *deploykit.FleetConfig
+	dc         *deploykit.DeployConfig
 	volumes    []deploykit.VolumeMount
 	bindMounts []deploykit.ResolvedBindMount
 }
@@ -226,7 +226,7 @@ func resolvePodStartDirect(ctx context.Context, ex *sdk.Executor, box, instance 
 		return nil, fmt.Errorf("port conflicts detected:%s", kit.FormatPortConflicts(conflicts, box))
 	}
 
-	var deployBox *spec.FleetNode
+	var deployBox *spec.DeployNode
 	if dc != nil {
 		if overlay, ok := dc.Lookup(box, instance); ok {
 			deployBox = &overlay

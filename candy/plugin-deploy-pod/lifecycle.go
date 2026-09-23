@@ -25,7 +25,7 @@ import (
 // Status/Logs/Shell/Rebuild shell to the charly CLI; PostTeardown = `charly remove` + drop overlay.
 
 // lifecycleParams are the common params the host proxy ships for a pod lifecycle Op (image/version
-// are passed explicitly so the plugin need not decode the whole FleetNode). Opts is polymorphic
+// are passed explicitly so the plugin need not decode the whole DeployNode). Opts is polymorphic
 // (LifecycleOpts for PrepareVenue, DeployTargetLogsOpts for Logs, DeployTargetRebuildOpts for
 // Rebuild) — decoded per-op.
 type lifecycleParams struct {
