@@ -1,8 +1,10 @@
 package deploypod
 
 import (
+	"context"
 	"testing"
 
+	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/deploykit"
 	"github.com/opencharly/sdk/kit"
 	"github.com/opencharly/spec/spec"
@@ -164,5 +166,41 @@ func TestQualifyImageRef(t *testing.T) {
 				t.Fatalf("qualification fired = %v, want %v", qualified, tc.wantQualified)
 			}
 		})
+	}
+}
+
+// TestDeployKeyToBoxLocal_NamespaceQualifiedProjectFallback is the R7 regression for the
+// namespaced-deploy resolution defect (RCA-H). On an empty per-host overlay, a namespaced
+// pod bed (`charly.check-dsh-pod`) resolves its box ONLY through the project fallback
+// (`loadUnifiedForBox` → `deploykit.ProjectDeployConfig(uf).Deploy[box]`). That projection
+// must fold namespaces (`uf.Deploys()`), so the qualified key carries the LEAF box name.
+//
+// The pre-fix SDK pinned by this plugin (v0.2026266.623) projected root-scope `uf.Deploy`
+// only, so `pc.Deploy["charly.check-dsh-pod"]` was ABSENT: the box name degraded to the
+// deploy key, and `charly config` reported
+// `image not found in local storage: charly.check-dsh-pod:charly.check-dsh-pod-<calver>`.
+// This test FAILS against that pin (empty return) and PASSES with the namespace-aware SDK.
+func TestDeployKeyToBoxLocal_NamespaceQualifiedProjectFallback(t *testing.T) {
+	origConnect, origLoad := projectConnect, loadUnifiedForBox
+	t.Cleanup(func() { projectConnect, loadUnifiedForBox = origConnect, origLoad })
+
+	projectConnect = func(_ context.Context, _ *sdk.Executor, _ string, pre *spec.DeployPluginsConnectReply) error {
+		pre.Dir = "/project"
+		return nil
+	}
+	ns := &spec.UnifiedFile{Deploy: map[string]spec.DeployNode{
+		"check-dsh-pod": {Target: "pod", Image: "dsh-app"},
+	}}
+	project := &spec.UnifiedFile{
+		Deploy:     map[string]spec.DeployNode{},
+		Namespaces: map[string]*spec.UnifiedFile{"charly": ns},
+	}
+	loadUnifiedForBox = func(_ context.Context, _ *sdk.Executor, _ string) (*spec.UnifiedFile, bool, error) {
+		return project, true, nil
+	}
+
+	got := deployKeyToBoxLocal(context.Background(), nil, nil, "charly.check-dsh-pod", "")
+	if got != "dsh-app" {
+		t.Fatalf("deployKeyToBoxLocal(namespaced) = %q, want %q — the project fallback must fold namespaces (SDK >= v0.2026269.920)", got, "dsh-app")
 	}
 }
