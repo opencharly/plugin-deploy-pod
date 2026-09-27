@@ -31,11 +31,15 @@ package deploypod
 
 import (
 	"context"
+	"embed"
 	"fmt"
 
 	"github.com/opencharly/sdk"
 	pb "github.com/opencharly/spec/proto"
 )
+
+//go:embed schema/*.cue
+var schemaFS embed.FS
 
 const calver = "2026.180.0001"
 
@@ -43,12 +47,13 @@ const calver = "2026.180.0001"
 func NewProvider() pb.ProviderServer { return &provider{} }
 
 // NewMeta advertises the deploy:pod capability (empty InputDef — the substrate carries no
-// authored plugin_input) + its self-contained, load-gate-only CUE schema, via
-// sdk.NewMeta → BuildCapabilities.
+// authored plugin_input) + this plugin's OWN self-contained CUE schema (schema/pod.cue,
+// defining #DeployPodPlugin, embedded via schemaFS), served over Describe via
+// sdk.NewMeta → BuildCapabilities. There is NO schema-less plugin.
 func NewMeta() pb.PluginMetaServer {
 	return sdk.NewMeta(calver,
 		[]sdk.ProvidedCapability{{Class: "deploy", Word: "pod", InputDef: "", Lifecycle: true}},
-		nil)
+		schemaFS)
 }
 
 type provider struct{ pb.UnimplementedProviderServer }
