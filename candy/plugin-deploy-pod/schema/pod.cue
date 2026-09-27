@@ -1,12 +1,19 @@
-// plugin-deploy-pod's OWN self-contained CUE schema — the SINGLE SOURCE for this
-// plugin's declaration surface. There is NO schema-less plugin: every plugin
-// ships a non-empty, self-contained schema, served over Describe (the SDK splices
-// `base ++ plugin` at the load gate), and this one DOCUMENTS the deploy
-// capability.
+// plugin-deploy-pod's OWN self-contained CUE schema — the SINGLE SOURCE for this plugin's
+// served declaration surface (there is no schema-less plugin: every plugin ships a
+// non-empty schema over Describe).
 //
-// SELF-CONTAINED: it references NO base def, so it compiles STANDALONE — the exact
-// property `cue exp gengotypes` needs to generate Go params, AND the property that
-// lets the SDK compile it serve-side.
+// SELF-CONTAINED and PACKAGE-LESS: it references no base def and carries no package
+// clause, so it compiles STANDALONE — the property the SDK's serve-side compile needs
+// and the property that lets the host splice `base ++ plugin` at the load gate
+// (registerPluginUnitSchema); a self-contained schema that will not splice is a LOUD
+// load failure.
+//
+// NO GO CONSUMER: the plugin declares no typed `plugin_input` (its authored input is
+// its pass-through CLI grammar), so this schema generates NO `params` package and has
+// NO `cue exp gengotypes` artifact — it is the SERVED documentation/config surface,
+// not a code-generation source.
+//
+// It DOCUMENTS the `deploy: pod` substrate word and its venue lifecycle.
 #DeployPodPlugin: {
 	// The deploy substrate word this plugin serves.
 	deploy: "pod"
