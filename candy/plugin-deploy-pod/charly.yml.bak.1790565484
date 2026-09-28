@@ -1,5 +1,7 @@
+version: 2026.232.0520
 plugin-deploy-pod:
     candy:
+        version: 2026.180.0001
         description: |-
             OUT-OF-TREE charly DEPLOY plugin serving the `pod` deploy SUBSTRATE —
             `target: pod` (the DEFAULT substrate: a deployment run as a container image via
