@@ -359,7 +359,11 @@ func podPrepareVenue(ctx context.Context, exec *sdk.Executor, p lifecycleParams)
 			plans = append(plans, plan)
 		}
 		overlayCandies := collectOverlayCandies(plans)
-		breq := spec.BuildRequest{Boxes: []string{baseName}, ExtraCandyRefs: overlayCandies, Dir: p.Dir}
+		extraRefs := make([]spec.ExtraCandyRef, 0, len(overlayCandies))
+		for _, r := range overlayCandies {
+			extraRefs = append(extraRefs, spec.ExtraCandyRef{Ref: r})
+		}
+		breq := spec.BuildRequest{Boxes: []string{baseName}, ExtraCandyRefs: extraRefs, Dir: p.Dir}
 		breqJSON, merr := json.Marshal(breq)
 		if merr != nil {
 			return nil, fmt.Errorf("plugin-deploy-pod prepare-venue: marshal build-generate-resolve request: %w", merr)

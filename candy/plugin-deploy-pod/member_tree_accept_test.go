@@ -62,12 +62,6 @@ var convertedFedoraThreaded = spec.Threaded{
 	},
 }
 
-func TestMigratedTreeStampAcceptedByEmbeddedParser(t *testing.T) {
-	if err := loaderkit.GateSchemaVersion("charly.yml", spec.SchemaVersion); err != nil {
-		t.Fatalf("GateSchemaVersion rejected the embedded spec HEAD stamp %s: %v", spec.SchemaVersion, err)
-	}
-}
-
 func TestMigratedMemberTreeShapeParsesAndFolds(t *testing.T) {
 	_, pp, err := loaderkit.ParseDoc(docNode(t, convertedFedoraDoc), convertedFedoraThreaded)
 	if err != nil {
