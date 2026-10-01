@@ -137,7 +137,7 @@ func loadDeploy(ctx context.Context, ex *sdk.Executor, caller string) (*deployki
 // -walk/-materialize) via deployConfigReader/deployMarshalNode, a multi-leg path a unit test must
 // not drive against the operator's real per-host overlay.
 var saveDeploy = func(ctx context.Context, ex *sdk.Executor, dc *deploykit.DeployConfig) error {
-	return deploykit.SaveDeployConfig(dc, deployMarshalNode(ctx, ex), deployConfigReader(ctx, ex))
+	return deploykit.SaveDeployConfig(dc, deployMarshalNode(ctx, ex), deployConfigReader(ctx, ex), ctx)
 }
 
 // mutateDeploy is the ONLY way this package writes the per-host overlay. It runs one locked
@@ -167,7 +167,7 @@ var saveDeploy = func(ctx context.Context, ex *sdk.Executor, dc *deploykit.Deplo
 var mutateDeploy = func(ctx context.Context, ex *sdk.Executor, caller string, mutate deploykit.DeployConfigMutator) (*deploykit.DeployConfig, error) {
 	read := func() (*deploykit.DeployConfig, error) { return loadDeploy(ctx, ex, caller) }
 	save := func(dc *deploykit.DeployConfig) error { return saveDeploy(ctx, ex, dc) }
-	return deploykit.MutateDeployConfig(read, save, mutate)
+	return deploykit.MutateDeployConfig(read, save, mutate, ctx)
 }
 
 //nolint:gocyclo // ported 1:1 from charly-core BoxConfigSetupCmd.runConfig — see the file header; splitting further would fragment the seam-call sequencing across files for no clarity gain

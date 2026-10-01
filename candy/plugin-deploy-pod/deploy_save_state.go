@@ -63,5 +63,5 @@ func deployConfigReader(ctx context.Context, ex *sdk.Executor) func() (*deployki
 func deploySaveState(ctx context.Context, ex *sdk.Executor, box, instance string, input spec.SaveDeployStateInput) {
 	marshalNode := deployMarshalNode(ctx, ex)
 	reader := func() (*deploykit.DeployConfig, error) { return loadDeploy(ctx, ex, "deploy-save-state") }
-	deploykit.SaveDeployState(box, instance, input, marshalNode, reader)
+	deploykit.SaveDeployState(box, instance, input, marshalNode, reader, ctx)
 }
