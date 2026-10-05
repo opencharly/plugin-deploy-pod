@@ -16,8 +16,8 @@
 // (exit 134), while the same image against a FRESH volume of the same path came out correct — which
 // is why this cannot be fixed in the image alone, and why the deploy path must reconcile the root
 // on every config rather than rely on the engine's one-shot creation. A deploy that re-runs is
-// exactly the normal case: teardown and `charly remove` deliberately keep named volumes (only
-// `--purge` deletes them), so a bed is not hermetic after a failed or aborted run.
+// exactly the normal case: `charly remove` deliberately keeps named volumes (its `--purge` flag is
+// spelled "Also remove named volumes"), so a bed is not hermetic after a failed or aborted run.
 package deploypod
 
 import (
@@ -30,8 +30,11 @@ import (
 )
 
 // volumeRootScratchPath is where the reconcile mounts the volume inside its throwaway container.
-// It is deliberately NOT the volume's real container path: mounting at the real path would mask
-// the image's directory there, and that directory's ownership is the reference we mirror.
+// It is deliberately NOT the volume's real container path: mounting an EMPTY named volume at a path
+// that exists in the image triggers the engine's copy-up, so a repair that is meant to change
+// nothing but the root's OWNERSHIP would populate the volume as a side effect. The scratch path
+// exists in no image, so the mount stays empty and the mount point — the volume's root directory —
+// is the only thing this helper touches.
 const volumeRootScratchPath = "/charly-volume-root"
 
 // Three different emitters can create the container a deploy's named volumes are attached to, and
@@ -86,45 +89,54 @@ func volumeRootKeepID(runMode, engine string, uid, bindMounts int) bool {
 // rootless mapping that is the host user who owns the volume — because the image's own user (e.g.
 // uid 1000) does not own the volume root and so cannot chown it.
 //
-// The script mirrors the image's directory ownership onto the volume root with `chown --reference`,
-// which is exactly what the engine's own copy-up does for a fresh volume: the helper shares the
-// runtime container's standard userns mapping, so a reference owned by in-container uid 1000 lands
-// as the same host UID the runtime user has. When the image has no directory at that path there is
-// no ownership to mirror (copy-up would not have touched the root either), so the fallback gives
-// the root to the runtime user directly, which is the only thing that user needs in order to write
-// there. `--entrypoint sh` makes the shell explicit: the deploy image may define an ENTRYPOINT of
-// its own, which would otherwise swallow the `-c` argument.
-func volumeRootReconcileArgs(engine, imageRef string, uid, gid int, vol deploykit.VolumeMount) []string {
-	script := fmt.Sprintf(
-		"if [ -e %q ]; then chown --reference=%q %q; else chown %d:%d %q; fi",
-		vol.ContainerPath, vol.ContainerPath, volumeRootScratchPath, uid, gid, volumeRootScratchPath)
+// The command is `chown <uid>:<gid> <scratch>`, run through `--entrypoint chown`: the volume root is
+// given to the deploy's RUNTIME USER directly. That is the property the deploy needs — that user
+// must be able to create its own files there — and the one the measured failure lacked. It is
+// deliberately NOT "copy the image directory's owner onto the root": that would reproduce the very
+// state being repaired whenever the image's directory is itself root-owned, which is how the
+// measured failure arose.
+//
+// Nothing here is passed through a shell, and that is a property of the shape of the command, not a
+// quoting discipline that could be got wrong later: the argv IS the command, `chown` is the
+// container's entrypoint, and its operands (`<uid>:<gid>` from two ints, and the constant scratch
+// path) are the only things it is ever given. A volume name or image reference carrying `$`, a
+// backtick or any other metacharacter has no shell in this container to interpret it. `--entrypoint`
+// also makes the command explicit: a deploy image may define an ENTRYPOINT of its own, which would
+// otherwise swallow these arguments.
+//
+// The one requirement on the image is therefore a `chown` — a POSIX utility present in every
+// standard distribution image and in BusyBox. No shell and no GNU `--reference` are needed.
+func volumeRootReconcileArgs(engine, imageRef string, uid, gid int, volumeName string) []string {
 	return []string{
 		kit.EngineBinary(engine), "run", "--rm",
 		"--user", "0",
-		"-v", vol.VolumeName + ":" + volumeRootScratchPath,
-		"--entrypoint", "sh",
-		imageRef, "-c", script,
+		"-v", volumeName + ":" + volumeRootScratchPath,
+		"--entrypoint", "chown",
+		imageRef, fmt.Sprintf("%d:%d", uid, gid), volumeRootScratchPath,
 	}
 }
 
 // reconcileNamedVolumeRoots gives every named volume of this deploy a root directory owned by the
-// owner of the image's directory at the same container path, before any container is created — so
-// the ownership is in place when the deploy's own `-v`/`Volume=` attach happens, whether the volume
-// is fresh (this helper creates it) or already populated (the case that fails today). It runs over
-// the served host executor; the plugin walks no host itself.
+// deploy's runtime user, before any container is created — so the ownership is in place when the
+// deploy's own `-v`/`Volume=` attach happens, whether the volume is fresh (this helper creates it)
+// or already populated (the case that fails today). It runs over the served host executor; the
+// plugin walks no host itself.
 //
-// A failure is fatal on purpose: the alternative to a reconciled root is a volume the runtime user
-// cannot write into, which surfaces later as the application's own crash (exactly the measured
-// exit=134) far away from its cause. The one assumption is a POSIX `sh` in the image — the same
-// assumption deploykit's runnable-image seeder already makes for the same kind of throwaway run.
+// A failure is fatal on purpose, and that is a deliberate behaviour change: an image that ships no
+// `chown` now fails HERE, at `charly config`, instead of failing later as the application's own
+// crash far from its cause (the measured exit=134) — or, worse, silently handing the application a
+// volume the runtime user cannot write into. Failing at the point where the ownership could not be
+// established is the honest outcome; the requirement it states (a POSIX `chown` in the image) is
+// smaller than the one the alternative would need, since it asks for neither a shell nor a GNU
+// `chown`.
 func reconcileNamedVolumeRoots(ctx context.Context, ex *sdk.Executor, engine string, keepID bool, uid, gid int, imageRef string, volumes []deploykit.VolumeMount) error {
 	if keepID || len(volumes) == 0 {
 		return nil
 	}
 	for _, vol := range volumes {
-		argv := volumeRootReconcileArgs(engine, imageRef, uid, gid, vol)
+		argv := volumeRootReconcileArgs(engine, imageRef, uid, gid, vol.VolumeName)
 		if err := ex.VenueRunSilent(ctx, shellJoin(argv)); err != nil {
-			return fmt.Errorf("plugin-deploy-pod reconcile volume root (%s at %s): %w", vol.VolumeName, vol.ContainerPath, err)
+			return fmt.Errorf("plugin-deploy-pod reconcile volume root (%s): %w", vol.VolumeName, err)
 		}
 	}
 	return nil

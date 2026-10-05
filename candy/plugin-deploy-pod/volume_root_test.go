@@ -16,7 +16,8 @@ import (
 // deploy (the engine only sets a named volume's root when it populates an EMPTY one), so a runtime
 // user of uid 1000 cannot write into its own volume — the runner's config.sh died with
 // `Access to the path '/home/user/actions-runner/_diag' is denied` (exit 134). These tests pin the
-// argv that repairs it, and pin the predicate that decides when the repair must NOT run.
+// argv that repairs it, the injection-safety property of that argv, and the predicate that decides
+// when the repair must NOT run.
 
 // hasKeepID reports whether an argv carries a keep-id userns flag, in either spelling
 // (`--userns=keep-id:…`, which this package emits, and `--userns keep-id:…`).
@@ -24,23 +25,32 @@ func hasKeepID(args []string) bool {
 	return strings.Contains(shellJoin(args), "keep-id")
 }
 
+// hasToken reports whether the argv carries an exact token.
+func hasToken(args []string, tok string) bool {
+	for _, a := range args {
+		if a == tok {
+			return true
+		}
+	}
+	return false
+}
+
 // TestVolumeRootReconcileArgs pins the reconcile argv: the deploy image, run as the container's
 // root (the image's own user does not own the volume root and cannot chown it), with the volume
-// mounted at the SCRATCH path — never at the volume's real container path, which would mask the
-// image's directory whose ownership is the reference — and a POSIX shell made explicit, because a
-// deploy image may define an ENTRYPOINT that would otherwise swallow the -c argument.
+// mounted at the SCRATCH path — never at the volume's real container path, where mounting an empty
+// volume would trigger the engine's copy-up and populate it as a side effect of a repair — and the
+// volume root given to the deploy's own runtime user.
 func TestVolumeRootReconcileArgs(t *testing.T) {
 	vol := deploykit.VolumeMount{VolumeName: "charly-githubrunner-state", ContainerPath: "/home/user/actions-runner"}
 
-	args := volumeRootReconcileArgs("podman", "charly-runner:2026.278.2123", 1000, 1000, vol)
+	args := volumeRootReconcileArgs("podman", "charly-runner:2026.278.2123", 1000, 1000, vol.VolumeName)
 
 	want := []string{
 		"podman", "run", "--rm",
 		"--user", "0",
 		"-v", "charly-githubrunner-state:/charly-volume-root",
-		"--entrypoint", "sh",
-		"charly-runner:2026.278.2123", "-c",
-		`if [ -e "/home/user/actions-runner" ]; then chown --reference="/home/user/actions-runner" "/charly-volume-root"; else chown 1000:1000 "/charly-volume-root"; fi`,
+		"--entrypoint", "chown",
+		"charly-runner:2026.278.2123", "1000:1000", "/charly-volume-root",
 	}
 	if len(args) != len(want) {
 		t.Fatalf("argv length: got %d (%q), want %d (%q)", len(args), args, len(want), want)
@@ -51,8 +61,9 @@ func TestVolumeRootReconcileArgs(t *testing.T) {
 		}
 	}
 
-	// The mount target must be the scratch path. Mounting the volume at its real container path
-	// would hide the image's directory, leaving nothing to mirror onto the root.
+	// The mount target must be the scratch path, and never the volume's real container path:
+	// mounting an EMPTY volume where the image has a directory would set off copy-up and populate
+	// the volume, which this helper must not do.
 	var mount string
 	for i, a := range args {
 		if a == "-v" {
@@ -65,18 +76,63 @@ func TestVolumeRootReconcileArgs(t *testing.T) {
 	if strings.Contains(mount, ":"+vol.ContainerPath) {
 		t.Errorf("volume must not be mounted at its real container path %q: %q", vol.ContainerPath, mount)
 	}
-	if !strings.Contains(args[len(args)-1], "--reference=") {
-		t.Errorf("reconcile must mirror the image directory's ownership, got %q", args[len(args)-1])
+
+	// The root is given to the deploy's own runtime user, as two ints — not to the image
+	// directory's owner, which is root-owned in exactly the state being repaired.
+	if !hasToken(args, "1000:1000") {
+		t.Errorf("reconcile must chown the root to the runtime user, got %q", args)
 	}
 
-	// A non-root runtime user gets the fallback ids, not a hardcoded 1000:1000.
-	other := volumeRootReconcileArgs("docker", "img", 1001, 1002,
-		deploykit.VolumeMount{VolumeName: "v", ContainerPath: "/missing"})
+	// There is no shell: the chown IS the container's entrypoint, so no operand can be interpreted
+	// as shell syntax (T3).
+	if hasToken(args, "sh") || hasToken(args, "-c") || !hasToken(args, "chown") {
+		t.Errorf("reconcile must run chown directly, with no shell: %q", args)
+	}
+
+	// A non-root runtime user gets its own ids, not a hardcoded 1000:1000.
+	other := volumeRootReconcileArgs("docker", "img", 1001, 1002, "v")
 	if got := other[0]; got != "docker" {
 		t.Errorf("engine binary: got %q, want %q", got, "docker")
 	}
-	if last := other[len(other)-1]; !strings.Contains(last, "chown 1001:1002") {
-		t.Errorf("fallback chown must use the deploy's own uid:gid, got %q", last)
+	if !hasToken(other, "1001:1002") {
+		t.Errorf("chown must use the deploy's own uid:gid, got %q", other)
+	}
+}
+
+// TestVolumeRootReconcileArgsIsShellSafe pins the property the reviewer raised (T3/R4): a volume's
+// ContainerPath must never reach a shell, however it is spelled. The reconcile builds its command
+// from an int pair and a package constant, and the path is not among the operands at all — so a
+// metacharacter in the path cannot be substituted by anything, in this container or on the host.
+// The host side is covered too: shellJoin quotes every token with shellquote.ShellQuote.
+func TestVolumeRootReconcileArgsIsShellSafe(t *testing.T) {
+	payloads := []string{
+		"/x$(touch /tmp/pwned)",
+		"/x`touch /tmp/pwned`",
+		"/x; touch /tmp/pwned",
+		`/x"; touch /tmp/pwned; "`,
+		"/x${IFS}touch",
+		"/x\n touch /tmp/pwned",
+	}
+	for _, cpath := range payloads {
+		vol := deploykit.VolumeMount{VolumeName: "charly-x-state", ContainerPath: cpath}
+		args := volumeRootReconcileArgs("podman", "img:tag", 1000, 1000, vol.VolumeName)
+
+		for i, a := range args {
+			if strings.Contains(a, cpath) {
+				t.Errorf("payload %q reached argv[%d]=%q", cpath, i, a)
+			}
+		}
+		if joined := shellJoin(args); strings.Contains(joined, cpath) {
+			t.Errorf("payload %q reached the host command line: %q", cpath, joined)
+		}
+		// The injection has no surface to begin with: the only operand that is not a constant is the
+		// numeric uid:gid pair.
+		if hasToken(args, "sh") || hasToken(args, "-c") {
+			t.Errorf("payload %q: reconcile must not invoke a shell: %q", cpath, args)
+		}
+		if !hasToken(args, "1000:1000") {
+			t.Errorf("payload %q: the deploy user's ids must be the numeric operand: %q", cpath, args)
+		}
 	}
 }
 
