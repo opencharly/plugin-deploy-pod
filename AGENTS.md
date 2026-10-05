@@ -30,7 +30,7 @@ Canonical files:
   before changing the substrate or the deploy entity shape. This candy carries
   no `skill:` entity of its own; the gap is tracked in
   [opencharly/opencharly#291](https://github.com/opencharly/opencharly/issues/291).
-- `/charly-core:deploy` — `charly fleet add`/`del`, quadlet generation, volume
+- `/charly-core:deploy` — `charly deploy add`/`del`, quadlet generation, volume
   backing, tunnels, and per-machine deploy overlays.
 - `/charly-internals:plugin` — the plugin authoring reference: the `plugin:`
   block, the `deploy` provider class, the per-plugin CUE-schema contract.
