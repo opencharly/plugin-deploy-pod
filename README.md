@@ -65,7 +65,7 @@ my-deploy:
 
 - Owning skill: `/charly-pod:pod` — the `kind: pod` / deploy entity schema
   reference.
-- `/charly-core:deploy` — `charly fleet add`/`del`, quadlet generation, tunnels,
+- `/charly-core:deploy` — `charly deploy add`/`del`, quadlet generation, tunnels,
   and per-machine deploy overlays.
 - `/charly-internals:plugin` — the plugin/provider model, including the `deploy`
   provider class.
