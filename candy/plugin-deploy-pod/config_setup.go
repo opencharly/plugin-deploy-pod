@@ -242,6 +242,17 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, c
 	imageRef = qualifyImageRef(imageRef, meta.Registry, c.ExplicitRef,
 		resolvedOverlayImage(dc, c.Box, c.Instance), deployBoxName, c.Tag)
 
+	// Reconcile every named volume's ROOT ownership to the deploy's runtime user (volume_root.go). A
+	// volume first populated from an image whose directory was root-owned keeps that root ownership
+	// for every later deploy — the engine fixes a named volume's root only when it populates an empty
+	// one — and the runtime user then cannot write into its own volume. It runs HERE, before either
+	// emission path below (the direct return and the quadlet write) and before any start, so the
+	// ownership is right however the container is created; `charly remove` keeps named volumes, so
+	// the re-run of an existing deploy is the normal case this must repair.
+	if err := reconcileNamedVolumeRoots(ctx, ex, rt.RunEngine, volumeRootKeepID(rt.RunMode, rt.RunEngine, uid, len(bindMounts)), uid, gid, imageRef, volumes); err != nil {
+		return err
+	}
+
 	var tunnelCfg *spec.TunnelConfig
 	if meta.Tunnel != nil {
 		// TunnelConfigFromMetadata PLUGIN-SIDE (#55 coneC-dsh — the pod-config-tunnel-resolve host
