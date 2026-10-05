@@ -511,7 +511,7 @@ func directPodmanArgs(qcfg deploykit.QuadletConfig, bindMounts []deploykit.Resol
 		args = append(args, "--env-file", qcfg.EnvFile)
 	}
 	args = append(args, deploykit.SecurityArgs(qcfg.Security)...)
-	if len(bindMounts) > 0 && qcfg.UID > 0 {
+	if directPodmanKeepID(qcfg.UID, len(bindMounts)) {
 		args = append(args, "--userns", fmt.Sprintf("keep-id:uid=%d,gid=%d", qcfg.UID, qcfg.GID))
 	}
 	args = append(args, qcfg.ImageRef)
@@ -1064,7 +1064,7 @@ func buildStartArgs(engine, imageRef string, uid, gid int, ports []string, name 
 			args = append(args, "-v", m)
 		}
 	}
-	if engine == "podman" && len(bindMounts) > 0 {
+	if startArgsKeepID(engine, len(bindMounts)) {
 		args = append(args, fmt.Sprintf("--userns=keep-id:uid=%d,gid=%d", uid, gid))
 	}
 	for _, e := range envVars {
