@@ -244,8 +244,8 @@ func buildOverlay(ctx context.Context, exec *sdk.Executor, reply spec.OverlayBui
 
 	buildScript := fmt.Sprintf("%s build -f %s -t %s %s",
 		engineBin, shellquote.ShellQuote(cfPathInVenue), shellquote.ShellQuote(overlayRef), shellquote.ShellQuote(venueBuildContext))
-	if err := exec.VenueRunSilent(ctx, buildScript); err != nil {
-		return "", fmt.Errorf("overlay build: %w", err)
+	if err := venueRun(ctx, exec, buildScript, "overlay build", reply.DeployName); err != nil {
+		return "", err
 	}
 
 	// Tag the overlay under <registry>/<deploy-name>:<calver> so deployment-name-keyed commands
@@ -388,10 +388,7 @@ func tagDeployAlias(ctx context.Context, exec *sdk.Executor, reply spec.OverlayB
 		return nil
 	}
 	tagScript := fmt.Sprintf("%s tag %s %s", engineBin, shellquote.ShellQuote(imageRef), shellquote.ShellQuote(aliasRef))
-	if err := exec.VenueRunSilent(ctx, tagScript); err != nil {
-		return fmt.Errorf("deploy-name alias tag: %w", err)
-	}
-	return nil
+	return venueRun(ctx, exec, tagScript, "deploy-name alias tag", reply.DeployName)
 }
 
 // collectOverlayCandies returns the set of candy names declared as add_candy in any plan's meta.

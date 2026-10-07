@@ -135,8 +135,8 @@ func reconcileNamedVolumeRoots(ctx context.Context, ex *sdk.Executor, engine str
 	}
 	for _, vol := range volumes {
 		argv := volumeRootReconcileArgs(engine, imageRef, uid, gid, vol.VolumeName)
-		if err := ex.VenueRunSilent(ctx, shellJoin(argv)); err != nil {
-			return fmt.Errorf("plugin-deploy-pod reconcile volume root (%s): %w", vol.VolumeName, err)
+		if err := venueRun(ctx, ex, shellJoin(argv), "reconcile volume root", vol.VolumeName); err != nil {
+			return err
 		}
 	}
 	return nil

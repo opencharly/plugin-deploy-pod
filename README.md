@@ -70,3 +70,18 @@ my-deploy:
 - `/charly-internals:plugin` — the plugin/provider model, including the `deploy`
   provider class.
 - [`opencharly/charly`](https://github.com/opencharly/charly) — the charly CLI.
+
+## Failure messages
+
+Every shell step this plugin drives on the venue runs through one helper (`venueRun` in
+`venue_exec.go`) which, on failure, returns an error carrying **the venue's own cause** — its
+stderr, or its exit code when it printed nothing — behind the operation and the artifact:
+
+```
+plugin-deploy-pod deploy-name alias tag (my-deploy): Error: ghcr.io/opencharly/x:2026.280.0000: image not known
+```
+
+Before this change the same failure reached the operator as `command exited 125`, with nothing
+naming the image, the reason, or the venue (`opencharly/plugin-deploy-pod#19`). Do not reintroduce a
+silent venue step: `VenueRunSilent` discards both streams, and this plugin no longer calls it
+anywhere (pinned by `venue_exec_test.go`).
