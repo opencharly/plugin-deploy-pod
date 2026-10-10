@@ -41,6 +41,16 @@ plugin-deploy-pod:
             (connectPluginByWordRef, like the credential/vm/kube host out-calls) and Invokes
             OpConfigWrite — so the WRITE is the plugin's, byte-identical to the former
             in-core write phase.
+            Every shell step this plugin drives on the venue goes through ONE helper
+            (venueRun, venue_exec.go): it runs the step with the CAPTURING primitive and, on
+            failure, returns an error naming the operation, the artifact it operated on AND the
+            venue's OWN cause — the venue's stderr, or its exit code when it printed nothing. The
+            silent path is gone from this plugin: a failing deploy-name alias tag now reads
+            `plugin-deploy-pod deploy-name alias tag (<deploy>): Error: <image>: image not known`
+            where it used to read `... : command exited 125` with nothing naming the image, the
+            reason or the venue (opencharly/plugin-deploy-pod#19). MEASURED live on a real pod
+            stop: before, `plugin-deploy-pod stop (<name>): command exited 125`; after,
+            `plugin-deploy-pod stop (<name>): Error: no container with name or ID "<name>" found`.
         plugin:
             providers:
                 - deploy:pod

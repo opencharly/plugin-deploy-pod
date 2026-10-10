@@ -198,11 +198,11 @@ func podExec(ctx context.Context, exec *sdk.Executor, p lifecycleParams) (*pb.In
 func podContainerStart(ctx context.Context, exec *sdk.Executor, plan spec.PodLifecyclePlan) error {
 	switch {
 	case plan.Mode == "direct":
-		return execErr(exec, ctx, shellJoin(plan.RunArgv), "start (direct)", plan.ContainerName)
+		return venueRun(ctx, exec, shellJoin(plan.RunArgv), "start (direct)", plan.ContainerName)
 	case plan.DirectDeploy:
-		return execErr(exec, ctx, "podman start "+shellquote.ShellQuote(plan.ContainerName), "start (direct-deploy)", plan.ContainerName)
+		return venueRun(ctx, exec, "podman start "+shellquote.ShellQuote(plan.ContainerName), "start (direct-deploy)", plan.ContainerName)
 	default:
-		return execErr(exec, ctx, "systemctl --user start "+shellquote.ShellQuote(plan.SvcName), "start", plan.SvcName)
+		return venueRun(ctx, exec, "systemctl --user start "+shellquote.ShellQuote(plan.SvcName), "start", plan.SvcName)
 	}
 }
 
@@ -210,9 +210,9 @@ func podContainerStart(ctx context.Context, exec *sdk.Executor, plan spec.PodLif
 // via systemctl so podman-stop + Restart=always cannot restart-loop); direct → `<engine> stop <ctr>`.
 func podContainerStop(ctx context.Context, exec *sdk.Executor, plan spec.PodLifecyclePlan) error {
 	if plan.Mode == "quadlet" {
-		return execErr(exec, ctx, "systemctl --user stop "+shellquote.ShellQuote(plan.SvcName), "stop", plan.SvcName)
+		return venueRun(ctx, exec, "systemctl --user stop "+shellquote.ShellQuote(plan.SvcName), "stop", plan.SvcName)
 	}
-	return execErr(exec, ctx, plan.EngineBin+" stop "+shellquote.ShellQuote(plan.ContainerName), "stop", plan.ContainerName)
+	return venueRun(ctx, exec, plan.EngineBin+" stop "+shellquote.ShellQuote(plan.ContainerName), "stop", plan.ContainerName)
 }
 
 // podTunnelOp composes verb:tunnel over InvokeProvider with the {plugin_input:{method,config}}
@@ -259,15 +259,6 @@ func shellJoin(argv []string) string {
 		quoted[i] = shellquote.ShellQuote(a)
 	}
 	return strings.Join(quoted, " ")
-}
-
-// execErr runs a shell command over the served host executor, wrapping a failure with the op label
-// and target name (mirroring the former StartCmd/StopCmd error text).
-func execErr(exec *sdk.Executor, ctx context.Context, script, label, target string) error {
-	if err := exec.VenueRunSilent(ctx, script); err != nil {
-		return fmt.Errorf("plugin-deploy-pod %s (%s): %w", label, target, err)
-	}
-	return nil
 }
 
 // podPrepareVenue builds the overlay image via HostBuild("overlay") (the host prep+resolve,
