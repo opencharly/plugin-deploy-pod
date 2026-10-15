@@ -47,11 +47,13 @@ pod-ensure-gate-absent:
         image: docker.io/library/busybox:zzz-ensure-gate-does-not-exist
         disposable: true
 
-# ARM 2's entity: an image that IS present locally and DOES carry charly's embedded metadata, so the
-# whole `charly config` path completes and the short-circuit branch is what runs.
+# ARM 2's entity: an image PROVISIONED from a PUBLIC registry by a pinned, immutable tag, carrying
+# charly's embedded metadata, so the whole `charly config` path completes and the short-circuit
+# branch is what runs. Provisioning is what makes this arm hermetic: nothing here depends on an
+# image some other repo happened to leave in a local store.
 pod-ensure-gate-present:
     pod:
-        image: localhost/check-kubevirt-pod:2026.287.2308
+        image: ghcr.io/opencharly/check-firecracker-app:2026.287.1522
         disposable: true
 
 pod-ensure-gate-template:
@@ -120,6 +122,10 @@ check-pod-ensure-gate:
                     LOG="$PWD/.check/pod-config-present.log"; mkdir -p "$(dirname "$LOG")"
                     arms() {
                     echo "== the binary under test is ${CHARLY_BIN} ($(${CHARLY_BIN} version 2>/dev/null | tail -1))"
+                    # PROVISION FIRST — the arm is hermetic only because the image comes from a PUBLIC
+                    # registry by a pinned tag, and the provision is idempotent (a present image is a
+                    # no-op). A clean machine pulls it here; nothing is assumed to be lying around.
+                    ${CHARLY_BIN} box pull ghcr.io/opencharly/check-firecracker-app:2026.287.1522 2>&1 | tail -2
                     ${CHARLY_BIN} config pod-ensure-gate-present > "$LOG.raw" 2>&1; rc=$?
                     grep -Ev '^plugin ' "$LOG.raw" | tail -8 || true
                     echo "== charly config rc=$rc"
@@ -127,6 +133,8 @@ check-pod-ensure-gate:
                     echo "== PE-CONFIG-OK"
                     }
                     if arms >"$LOG" 2>&1; then :; else rc=$?; cat "$LOG"; exit $rc; fi
+                    grep -q 'check-firecracker-app:2026.287.1522 present' "$LOG" || { echo "the provision leg did not report the published image present — the arm's input is not established"; cat "$LOG"; exit 1; }
                     grep -q 'charly config rc=0' "$LOG" || { echo "the command's own exit status is not in the evidence"; cat "$LOG"; exit 1; }
                     cat "$LOG"
                     echo PE-CONFIG-OK
+
