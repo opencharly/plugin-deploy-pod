@@ -11,3 +11,130 @@
 discover:
     - path: candy
       recursive: true
+
+# ---------------------------------------------------------------------------
+# THE R10 BED for plugin-deploy-pod's IMAGE-PRESENT path (opencharly/opencharly#481 leg 17).
+#
+# WHY THIS BED EXISTS: this lane migrates the engine the pod deploy hands to `ensureImagePresent`
+# — the function that guarantees a pod's image is in podman's store before the config is written.
+# It used to read the IMAGE BUILDER's engine (`rt.BuildEngine`); the builder is BuildKit now, which
+# is not a container engine, so what that path always needed was `engine.run`. What a user observes
+# is `charly config` on a pod deploy resolving and ensuring its image, so that is the gate.
+#
+# THE COMPOSITION IS THE POINT: `deploy:pod` is an OUT-OF-TREE provider, so the bed's project must
+# compose THIS repo's candy (`plugin-deploy-pod`) for the host to build the plugin from this
+# worktree's own source — the gate then exercises THIS code, not a released plugin. The idiom is
+# plugin-bpf's `check-bpf-local-app` (an out-of-tree plugin gating itself).
+#
+# THE ENSURE PATH MUST FIRE, which is why the entity's image is a SMALL PUBLIC ref that is NOT in
+# the local store: the short-circuit at the top of `ensureImagePresent` would otherwise return
+# before the migrated code runs. The step asserts the command's OWN exit status from a retained log,
+# never a pipeline's.
+#
+# `${CHARLY_BIN}` is BRACED and named in the step's own evidence, so a run against a stale install
+# is impossible rather than merely unlikely.
+# ---------------------------------------------------------------------------
+
+# The entity the gate configures: a pod deploy whose image is absent locally, so the migrated
+# ensure path runs. (A pod's image is normally a charly candybox; what this gate proves is the
+# ENSURE leg — resolution, the run-engine transfer check and the build:ensure peer dispatch — not
+# the guest's own contents.)
+# ARM 1's entity: the ref is ABSENT BY CONSTRUCTION (a tag that does not exist), so the ensure leg
+# always fires and the arm is idempotent — unlike a real public ref, which the first run would pull
+# into the store and every later run would then short-circuit past.
+pod-ensure-gate-absent:
+    pod:
+        image: docker.io/library/busybox:zzz-ensure-gate-does-not-exist
+        disposable: true
+
+# ARM 2's entity: an image PROVISIONED from a PUBLIC registry by a pinned, immutable tag, carrying
+# charly's embedded metadata, so the whole `charly config` path completes and the short-circuit
+# branch is what runs. Provisioning is what makes this arm hermetic: nothing here depends on an
+# image some other repo happened to leave in a local store.
+pod-ensure-gate-present:
+    pod:
+        image: ghcr.io/opencharly/check-firecracker-app:2026.287.1522
+        disposable: true
+
+pod-ensure-gate-template:
+    local:
+        description: |-
+            Minimal kind:local template for the pod image-ensure bed: composes THIS repo's
+            out-of-tree `plugin-deploy-pod` candy so the host builds the plugin from this worktree,
+            and carries no plan — the checks live on the deploy that composes it.
+        candy:
+            - plugin-deploy-pod
+
+check-pod-ensure-gate:
+    local:
+        from: pod-ensure-gate-template
+        host: local
+        disposable: true
+        lifecycle: test
+        plan:
+            - check: the IMAGE-ENSURE dispatch runs on the ACTIVE binary — for a pod whose image is
+                  absent, the migrated leg reaches the build:ensure peer (the request the contract
+                  changed) and the path's verdict is its own named not-local error, never a decode
+                  or contract failure
+              id: pe-ensure-dispatch-runs
+              context: [runtime]
+              timeout: 900s
+              exit_status: 0
+              stdout:
+                contains: PE-DISPATCH-OK
+              command:
+                in_container: false
+                command: |
+                    set -eu
+                    LOG="$PWD/.check/pod-ensure-dispatch.log"; mkdir -p "$(dirname "$LOG")"
+                    arms() {
+                    echo "== the binary under test is ${CHARLY_BIN} ($(${CHARLY_BIN} version 2>/dev/null | tail -1))"
+                    ${CHARLY_BIN} config pod-ensure-gate-absent > "$LOG.raw" 2>&1; rc=$?
+                    grep -Ev '^plugin ' "$LOG.raw" | tail -8 || true
+                    echo "== charly config rc=$rc"
+                    echo "== PE-DISPATCH-OK"
+                    }
+                    if arms >"$LOG" 2>&1; then :; else rc=$?; cat "$LOG"; exit $rc; fi
+                    # THE MIGRATED LEG RAN: the ensure leg names the image and starts the fetch. This is
+                    # the code the change touches — the dispatch with the contracted-away field gone.
+                    grep -q 'ensure-image: pulling ' "$LOG" || { echo "the ensure leg never fired, so nothing this change migrates was exercised"; cat "$LOG"; exit 1; }
+                    grep -q 'zzz-ensure-gate-does-not-exist' "$LOG" || { echo "the ensure leg named a different image"; cat "$LOG"; exit 1; }
+                    # AND IT FAILED AS THE CONTRACT SAYS, not as a decode/contract error: a retired field
+                    # reaching the peer would surface here as an unknown-field or unmarshal failure.
+                    if grep -qiE 'unknown field|BuildEngine|cannot unmarshal|invalid character' "$LOG"; then
+                      echo "the peer rejected the REQUEST (a contract failure), not the image"; cat "$LOG"; exit 1
+                    fi
+                    grep -q 'charly config rc=' "$LOG" || { echo "the command's own exit status is not in the evidence"; cat "$LOG"; exit 1; }
+                    cat "$LOG"
+                    echo PE-DISPATCH-OK
+            - check: the pod config path completes on the ACTIVE binary for a pod whose image IS present
+                  and carries charly's metadata — the same path, the short-circuit branch, end to end
+              id: pe-config-path-completes
+              context: [runtime]
+              timeout: 900s
+              exit_status: 0
+              stdout:
+                contains: PE-CONFIG-OK
+              command:
+                in_container: false
+                command: |
+                    set -eu
+                    LOG="$PWD/.check/pod-config-present.log"; mkdir -p "$(dirname "$LOG")"
+                    arms() {
+                    echo "== the binary under test is ${CHARLY_BIN} ($(${CHARLY_BIN} version 2>/dev/null | tail -1))"
+                    # PROVISION FIRST — the arm is hermetic only because the image comes from a PUBLIC
+                    # registry by a pinned tag, and the provision is idempotent (a present image is a
+                    # no-op). A clean machine pulls it here; nothing is assumed to be lying around.
+                    ${CHARLY_BIN} box pull ghcr.io/opencharly/check-firecracker-app:2026.287.1522 2>&1 | tail -2
+                    ${CHARLY_BIN} config pod-ensure-gate-present > "$LOG.raw" 2>&1; rc=$?
+                    grep -Ev '^plugin ' "$LOG.raw" | tail -8 || true
+                    echo "== charly config rc=$rc"
+                    [ "$rc" = "0" ] || { echo "the pod config path failed ($rc) on a present, metadata-carrying image"; tail -20 "$LOG.raw"; exit 1; }
+                    echo "== PE-CONFIG-OK"
+                    }
+                    if arms >"$LOG" 2>&1; then :; else rc=$?; cat "$LOG"; exit $rc; fi
+                    grep -q 'check-firecracker-app:2026.287.1522 present' "$LOG" || { echo "the provision leg did not report the published image present — the arm's input is not established"; cat "$LOG"; exit 1; }
+                    grep -q 'charly config rc=0' "$LOG" || { echo "the command's own exit status is not in the evidence"; cat "$LOG"; exit 1; }
+                    cat "$LOG"
+                    echo PE-CONFIG-OK
+

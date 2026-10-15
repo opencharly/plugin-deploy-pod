@@ -128,7 +128,7 @@ func resolvePodRuntimeImage(ctx context.Context, ex *sdk.Executor, box, instance
 	if err != nil {
 		return nil, err
 	}
-	if err := ensureImagePresent(ctx, ex, imageRef, rt.BuildEngine); err != nil {
+	if err := ensureImagePresent(ctx, ex, imageRef, rt.RunEngine); err != nil {
 		return nil, err
 	}
 	metaPtr, err := deploykit.ExtractMetadata("podman", imageRef)

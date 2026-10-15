@@ -31,17 +31,27 @@ import (
 const podRunEngine = "podman"
 
 // ensureImagePresent guarantees imageRef is available in podman's local store, driving the store
-// itself (no host round-trip): (1) already-present short-circuit, (2) cross-engine transfer when
-// buildEngine differs and already has the image, (3) build:ensure peer-dispatch (pulls from the
-// registry, falling back to a local build for a project charly.yml entry).
-func ensureImagePresent(ctx context.Context, ex *sdk.Executor, imageRef, buildEngine string) error {
+// itself (no host round-trip): (1) already-present short-circuit, (2) cross-engine transfer when the
+// RUN engine differs from podman and already has the image, (3) build:ensure peer-dispatch (pulls
+// from the registry, falling back to a local build for a project charly.yml entry).
+//
+// THE ENGINE HERE IS THE RUN ENGINE, and that is the migration this file carries
+// (opencharly/opencharly#481, whose operator scope is the image BUILDER only). It used to read
+// `rt.BuildEngine` — the IMAGE BUILDER — which was wrong on both counts once the builder became
+// BuildKit: the field is gone from the contract, and a builder is not a container engine, so it
+// could never name a store that HOLDS A CONTAINER IMAGE. That is exactly what this function asks
+// one to do (transfer an image to podman, or ensure it through the peer), so the answer was always
+// `engine.run`. The peer request's own retired `BuildEngine` field is gone and its value is NOT
+// replaced by another field: the request already carries `RunEngine`, which is what the receiving
+// word uses.
+func ensureImagePresent(ctx context.Context, ex *sdk.Executor, imageRef, runEngine string) error {
 	if container.LocalImageExists(podRunEngine, imageRef) {
 		return nil
 	}
-	if buildEngine != "" && buildEngine != podRunEngine && container.LocalImageExists(buildEngine, imageRef) {
-		return container.TransferImage(buildEngine, podRunEngine, imageRef)
+	if runEngine != "" && runEngine != podRunEngine && container.LocalImageExists(runEngine, imageRef) {
+		return container.TransferImage(runEngine, podRunEngine, imageRef)
 	}
-	if err := dispatchBuildEnsurePeer(ctx, ex, imageRef, buildEngine); err == nil {
+	if err := dispatchBuildEnsurePeer(ctx, ex, imageRef); err == nil {
 		return nil
 	}
 	return fmt.Errorf("%w: %s", spec.ErrImageNotLocal, imageRef)
@@ -52,11 +62,10 @@ func ensureImagePresent(ctx context.Context, ex *sdk.Executor, imageRef, buildEn
 // other callers) reaches via the core-private providerRegistry; a plugin reaches it via the
 // generic Executor.InvokeProvider peer-dispatch leg instead (class-agnostic — "build"/"ensure" is
 // treated identically to any other (class, word) pair).
-func dispatchBuildEnsurePeer(ctx context.Context, ex *sdk.Executor, imageRef, buildEngine string) error {
+func dispatchBuildEnsurePeer(ctx context.Context, ex *sdk.Executor, imageRef string) error {
 	params, err := json.Marshal(spec.BuildEnsureRequest{
-		Image:       imageRef,
-		BuildEngine: buildEngine,
-		RunEngine:   podRunEngine,
+		Image:     imageRef,
+		RunEngine: podRunEngine,
 	})
 	if err != nil {
 		return err
