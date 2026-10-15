@@ -13,8 +13,9 @@ import (
 // image_ensure_test.go — ported from the former charly/ensure_image_test.go's
 // TestEnsureImagePresent (K-wave W3a B6). The subject's signature changed: the run engine is now
 // hardcoded "podman" (matching the deleted host body's own podmanRT.RunEngine hardcode — a pod
-// deploy always runs on podman), so cases exercised with an explicit RunEngine now pass buildEngine
-// only. Tier-3 (build:ensure peer-dispatch) needs a live *sdk.Executor to avoid a nil-pointer
+// deploy always runs on podman), so cases exercised with an explicit RunEngine now pass runEngine
+// only — and since opencharly/opencharly#481 that parameter IS the run engine, by name as well as
+// by meaning. Tier-3 (build:ensure peer-dispatch) needs a live *sdk.Executor to avoid a nil-pointer
 // panic in InvokeProvider (spec/exec.Executor.client) — unlike core's former
 // providerRegistry.resolve, which degraded gracefully with ok=false in a bare test binary. Those
 // subtests use the SAME recover-based nil-executor pattern already established in this package
@@ -44,10 +45,10 @@ func TestEnsureImagePresent(t *testing.T) {
 		var checks []string
 		container.LocalImageExists = func(engine, ref string) bool {
 			checks = append(checks, engine)
-			return engine == "docker" // only in build engine
+			return engine == "docker" // present only in the other engine’s store
 		}
 		// TransferImage will fail (no real docker/podman), but we verify the check order:
-		// run engine (podman) first, then build engine (docker).
+		// the pod's own engine (podman) first, then the RUN engine handed in (docker).
 		_ = ensureImagePresent(t.Context(), nil, "myimage:latest", "docker")
 		if len(checks) < 2 {
 			t.Fatalf("expected at least 2 ImageExists checks, got %d", len(checks))
@@ -56,7 +57,7 @@ func TestEnsureImagePresent(t *testing.T) {
 			t.Errorf("first check should be run engine (%s), got %s", podRunEngine, checks[0])
 		}
 		if checks[1] != "docker" {
-			t.Errorf("second check should be build engine (docker), got %s", checks[1])
+			t.Errorf("second check should be the RUN engine (docker), got %s", checks[1])
 		}
 	})
 
@@ -65,7 +66,7 @@ func TestEnsureImagePresent(t *testing.T) {
 		// always "podman", so this exercises the transfer FROM docker TO podman (the deleted
 		// core test's "podman to docker transfer" case inverted RunEngine to docker — no longer
 		// expressible now that RunEngine is hardcoded, so this proves the same transfer LEG
-		// instead: buildEngine=docker, runEngine=podman, image present only in docker).
+		// instead: the run engine handed in is docker and the pod runs on podman, image present only in docker).
 		if _, err := exec.LookPath("docker"); err != nil {
 			t.Skip("docker not available, skipping cross-engine transfer test")
 		}
