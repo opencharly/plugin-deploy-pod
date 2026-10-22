@@ -192,18 +192,32 @@ func podExec(ctx context.Context, exec *sdk.Executor, p lifecycleParams) (*pb.In
 	return marshalReply(spec.PodExecReply{Output: stdout + stderr, ExitCode: code})
 }
 
-// podContainerStart runs the resolved container start over the served host executor: quadlet →
-// `systemctl --user start <svc>`; direct-deploy marker → `podman start <ctr>`; direct → the
-// fully-built `podman run -d …` argv. Mirrors StartCmd.runQuadlet / runDirect's exec.
-func podContainerStart(ctx context.Context, exec *sdk.Executor, plan spec.PodLifecyclePlan) error {
+// podStartCommand resolves the start command for a plan: direct → the fully-built engine
+// argv; direct-deploy marker → `podman start <ctr>`; a unit run mode (quadlet OR
+// systemd-unit — both are supervised by systemd) → `systemctl --user start <svc>`.
+// Explicit on IsUnitRunMode so a new unit mode cannot fall into the exec-argv branch, and
+// an unknown mode is refused rather than exec'd as an empty argv.
+func podStartCommand(plan spec.PodLifecyclePlan) (cmd, label, target string, err error) {
 	switch {
 	case plan.Mode == "direct":
-		return venueRun(ctx, exec, shellJoin(plan.RunArgv), "start (direct)", plan.ContainerName)
+		return shellJoin(plan.RunArgv), "start (direct)", plan.ContainerName, nil
 	case plan.DirectDeploy:
-		return venueRun(ctx, exec, "podman start "+shellquote.ShellQuote(plan.ContainerName), "start (direct-deploy)", plan.ContainerName)
+		return "podman start " + shellquote.ShellQuote(plan.ContainerName), "start (direct-deploy)", plan.ContainerName, nil
+	case kit.IsUnitRunMode(plan.Mode):
+		return "systemctl --user start " + shellquote.ShellQuote(plan.SvcName), "start", plan.SvcName, nil
 	default:
-		return venueRun(ctx, exec, "systemctl --user start "+shellquote.ShellQuote(plan.SvcName), "start", plan.SvcName)
+		return "", "", "", fmt.Errorf("unsupported pod start run mode %q", plan.Mode)
 	}
+}
+
+// podContainerStart runs the resolved container start over the served host executor. Mirrors
+// StartCmd.runQuadlet / runDirect's exec.
+func podContainerStart(ctx context.Context, exec *sdk.Executor, plan spec.PodLifecyclePlan) error {
+	cmd, label, target, err := podStartCommand(plan)
+	if err != nil {
+		return err
+	}
+	return venueRun(ctx, exec, cmd, label, target)
 }
 
 // podContainerStop runs the resolved container stop: a unit run mode (quadlet or

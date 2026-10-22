@@ -1,6 +1,7 @@
 package deploypod
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -221,4 +222,92 @@ func TestWriteSystemdUnitConfig_Containerd(t *testing.T) {
 // uses, keeping the test's expectation data-driven rather than retyped.
 func engineCapabilityForTest(engine string) (spec.EngineCapability, bool) {
 	return container.EngineCapabilityFor(engine)
+}
+
+// TestPodStartCommand_UnitRunModesUseSystemctl pins the start decision: BOTH unit modes start
+// through systemctl, a direct-deploy marker keeps `podman start`, a direct plan execs its
+// argv, and an unknown mode is refused instead of exec'ing an empty argv.
+func TestPodStartCommand_UnitRunModesUseSystemctl(t *testing.T) {
+	for _, mode := range []string{"quadlet", "systemd-unit"} {
+		plan := spec.PodLifecyclePlan{Mode: mode, SvcName: "charly-demo.service", ContainerName: "charly-demo"}
+		cmd, label, target, err := podStartCommand(plan)
+		if err != nil {
+			t.Fatalf("%s: %v", mode, err)
+		}
+		if want := "systemctl --user start 'charly-demo.service'"; cmd != want {
+			t.Errorf("%s start: got %q, want %q", mode, cmd, want)
+		}
+		if label != "start" || target != "charly-demo.service" {
+			t.Errorf("%s start label/target: got %q/%q", mode, label, target)
+		}
+	}
+
+	direct := spec.PodLifecyclePlan{Mode: "direct", ContainerName: "charly-demo", RunArgv: []string{"nerdctl", "run", "img"}}
+	if cmd, _, _, err := podStartCommand(direct); err != nil || cmd != "'nerdctl' 'run' 'img'" {
+		t.Errorf("direct start: got %q, %v", cmd, err)
+	}
+	directDeploy := spec.PodLifecyclePlan{Mode: "quadlet", DirectDeploy: true, ContainerName: "charly-demo"}
+	if cmd, _, _, err := podStartCommand(directDeploy); err != nil || cmd != "podman start 'charly-demo'" {
+		t.Errorf("direct-deploy start: got %q, %v", cmd, err)
+	}
+	if _, _, _, err := podStartCommand(spec.PodLifecyclePlan{Mode: "bogus"}); err == nil {
+		t.Error("unknown run mode must be refused")
+	}
+}
+
+// TestResolvePodStartSystemdUnit_StartsViaSystemctl resolves a containerd systemd-unit start
+// plan through the real resolver (a unit file present for the deploy) and proves it is started
+// by systemctl — never by exec'ing the (empty) launch argv.
+func TestResolvePodStartSystemdUnit_StartsViaSystemctl(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	svcDir := filepath.Join(home, ".config", "systemd", "user")
+	if err := os.MkdirAll(svcDir, 0o755); err != nil {
+		t.Fatalf("mkdir unit dir: %v", err)
+	}
+	svc := "charly-demo.service"
+	if err := os.WriteFile(filepath.Join(svcDir, svc), []byte("[Unit]\nDescription=demo\n"), 0o600); err != nil {
+		t.Fatalf("write unit: %v", err)
+	}
+
+	rt := kitResolvedRuntimeForTest("containerd", "systemd-unit", "auto")
+	plan, err := resolvePodStartSystemdUnit(context.Background(), nil, "demo", "", rt)
+	if err != nil {
+		t.Fatalf("resolvePodStartSystemdUnit: %v", err)
+	}
+	if plan.Mode != "systemd-unit" || plan.DirectDeploy {
+		t.Fatalf("plan mode: got %q directDeploy=%v, want systemd-unit/false", plan.Mode, plan.DirectDeploy)
+	}
+	if len(plan.RunArgv) != 0 {
+		t.Fatalf("systemd-unit plan must not carry a launch argv, got %q", plan.RunArgv)
+	}
+	cmd, _, target, err := podStartCommand(*plan)
+	if err != nil {
+		t.Fatalf("podStartCommand: %v", err)
+	}
+	if want := "systemctl --user start '" + svc + "'"; cmd != want || target != svc {
+		t.Errorf("start: got %q/%q, want %q/%q", cmd, target, want, svc)
+	}
+}
+
+// TestEngineKeepID_ContainerdHasNoKeepIDArg pins the keep-id fact to the capability row: the
+// containerd row leaves UsernsKeepIDArg empty, so nerdctl never gets podman's spelling.
+func TestEngineKeepID_ContainerdHasNoKeepIDArg(t *testing.T) {
+	if engineKeepID("containerd", 1) {
+		t.Error("containerd must not emit a keep-id argument")
+	}
+	if !engineKeepID("podman", 1) {
+		t.Error("podman's capability row declares keep-id; the podman control arm must keep it")
+	}
+}
+
+// TestWriteSystemdUnitConfig_RejectsBareEnv proves a bare `KEY` env entry is refused with the
+// reason, not silently dropped from the unit.
+func TestWriteSystemdUnitConfig_RejectsBareEnv(t *testing.T) {
+	rt := kitResolvedRuntimeForTest("containerd", "systemd-unit", "auto")
+	qcfg := deploykit.QuadletConfig{BoxName: "demo", ImageRef: "img", Env: []string{"FOO"}}
+	if _, err := writeSystemdUnitConfig(rt, qcfg, nil, nil, nil); err == nil || !strings.Contains(err.Error(), "inherit host environment variable") {
+		t.Errorf("bare env entry must be refused, got %v", err)
+	}
 }

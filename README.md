@@ -42,8 +42,8 @@ install steps INTO the image at BUILD time:
 - The pod config-WRITE also lives here: `OpConfigWrite` renders the
   quadlet/`.pod`/sidecar/tunnel file contents and writes them at the host-resolved
   absolute paths + exact modes. For the `systemd-unit` run mode (containerd), the
-  file is the engine `unit_emit` service and the file count is one (sidecars
-  require the quadlet run mode).
+  file is the engine `unit_emit` service, plus the tunnel companion unit when a
+  tunnel is configured (sidecars require the quadlet run mode).
 
 ## How to use it
 

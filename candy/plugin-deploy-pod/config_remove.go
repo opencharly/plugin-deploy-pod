@@ -56,6 +56,11 @@ func runPodConfigRemove(c *spec.PodConfigRemoveRequest) error {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		_ = cmd.Run()
+		// Same contract as the quadlet branch below (and its doc comment above):
+		// `charly config remove` ONLY disables the service — the emitted unit file remains,
+		// so the deploy stays configured and can be started again. `charly remove` is the
+		// complete teardown that deletes the unit and reloads systemd
+		// (charly/CHANGELOG/2026.221.2032.md).
 		fmt.Fprintf(os.Stderr, "Disabled %s\n", svc)
 		return nil
 	}

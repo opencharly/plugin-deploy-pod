@@ -26,6 +26,14 @@ func writeSystemdUnitConfig(rt *kit.ResolvedRuntime, qcfg deploykit.QuadletConfi
 	if rootfulUnsupported(rt) {
 		return nil, rootfulRefusal(engine, rt.RunMode)
 	}
+	// A bare `KEY` env entry means "inherit this variable from the host"; systemd's
+	// Environment= has no inherit form and EngineUnitRequest carries no PassEnvironment
+	// field, so the unit cannot represent it. Refuse it instead of silently dropping it.
+	for _, kv := range qcfg.Env {
+		if !strings.Contains(kv, "=") {
+			return nil, fmt.Errorf("systemd-unit cannot inherit host environment variable %q: only KEY=VALUE entries are representable in a systemd unit (set the value explicitly)", kv)
+		}
+	}
 	if len(sidecars) > 0 {
 		fmt.Fprintf(os.Stderr, "Warning: sidecars are not supported in systemd-unit mode (skipping); use run_mode=quadlet for sidecar deploys.\n")
 	}

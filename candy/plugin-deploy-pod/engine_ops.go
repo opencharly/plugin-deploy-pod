@@ -242,7 +242,9 @@ func rootfulUnsupported(rt *kit.ResolvedRuntime) bool {
 }
 
 // envSliceToStrMap converts the pod's ordered `KEY=VALUE` env list to the request's map form.
-// start_plan emits `-e KEY=VALUE` from it; order is not significant to the engine.
+// start_plan emits `-e KEY=VALUE` from it; order is not significant to the engine. A bare
+// `KEY` (inherit-from-host) has no place in the map: the start_plan request only carries
+// KEY=VALUE, and writeSystemdUnitConfig refuses a bare entry rather than dropping it.
 func envSliceToStrMap(env []string) spec.StrMap {
 	if len(env) == 0 {
 		return nil
