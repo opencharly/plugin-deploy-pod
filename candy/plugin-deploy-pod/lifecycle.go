@@ -206,10 +206,11 @@ func podContainerStart(ctx context.Context, exec *sdk.Executor, plan spec.PodLif
 	}
 }
 
-// podContainerStop runs the resolved container stop: quadlet → `systemctl --user stop <svc>` (always
-// via systemctl so podman-stop + Restart=always cannot restart-loop); direct → `<engine> stop <ctr>`.
+// podContainerStop runs the resolved container stop: a unit run mode (quadlet or
+// systemd-unit) → `systemctl --user stop <svc>` (always via systemctl so podman-stop +
+// Restart=always cannot restart-loop); direct → `<engine> stop <ctr>`.
 func podContainerStop(ctx context.Context, exec *sdk.Executor, plan spec.PodLifecyclePlan) error {
-	if plan.Mode == "quadlet" {
+	if kit.IsUnitRunMode(plan.Mode) {
 		return venueRun(ctx, exec, "systemctl --user stop "+shellquote.ShellQuote(plan.SvcName), "stop", plan.SvcName)
 	}
 	return venueRun(ctx, exec, plan.EngineBin+" stop "+shellquote.ShellQuote(plan.ContainerName), "stop", plan.ContainerName)
@@ -311,11 +312,13 @@ func podPrepareVenue(ctx context.Context, exec *sdk.Executor, p lifecycleParams)
 	var baseSecurity *spec.Security
 	var baseRegistry string
 	if reply.BaseImage != "" {
-		if baseMeta, merr := deploykit.ExtractMetadata("podman", reply.BaseImage); merr == nil && baseMeta != nil {
-			baseUser = baseMeta.User
-			sec := baseMeta.Security
-			baseSecurity = &sec
-			baseRegistry = baseMeta.Registry
+		if rt, rterr := kit.ResolveRuntime(); rterr == nil {
+			if baseMeta, merr := deploykit.ExtractMetadata(rt.RunEngine, reply.BaseImage); merr == nil && baseMeta != nil {
+				baseUser = baseMeta.User
+				sec := baseMeta.Security
+				baseSecurity = &sec
+				baseRegistry = baseMeta.Registry
+			}
 		}
 	}
 

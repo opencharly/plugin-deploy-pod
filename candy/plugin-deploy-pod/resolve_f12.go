@@ -220,7 +220,7 @@ func buildShellArgs(engine, imageRef string, uid, gid int, ports []string, volum
 			args = append(args, "-v", m)
 		}
 	}
-	if startArgsKeepID(engine, len(bindMounts)) {
+	if engineKeepID(engine, len(bindMounts)) {
 		args = append(args, fmt.Sprintf("--userns=keep-id:uid=%d,gid=%d", uid, gid))
 	}
 	for _, e := range envVars {

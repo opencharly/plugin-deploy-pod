@@ -2,99 +2,63 @@ package deploypod
 
 import (
 	"errors"
-	"os/exec"
-	"strings"
 	"testing"
 
 	"github.com/opencharly/spec/container"
 	"github.com/opencharly/spec/spec"
 )
 
-// image_ensure_test.go — ported from the former charly/ensure_image_test.go's
-// TestEnsureImagePresent (K-wave W3a B6). The subject's signature changed: the run engine is now
-// hardcoded "podman" (matching the deleted host body's own podmanRT.RunEngine hardcode — a pod
-// deploy always runs on podman), so cases exercised with an explicit RunEngine now pass runEngine
-// only — and since opencharly/opencharly#481 that parameter IS the run engine, by name as well as
-// by meaning. Tier-3 (build:ensure peer-dispatch) needs a live *sdk.Executor to avoid a nil-pointer
-// panic in InvokeProvider (spec/exec.Executor.client) — unlike core's former
-// providerRegistry.resolve, which degraded gracefully with ok=false in a bare test binary. Those
-// subtests use the SAME recover-based nil-executor pattern already established in this package
-// (config_setup_test.go's TestRunPodConfigSetup_DirectModeAllowed) since a genuine fake executor
-// is unwarranted for what tier-1/tier-2 already prove; only "does it REACH tier 3" is asserted
-// there, not tier 3's own result (build:ensure's own behavior is out of this package's scope).
+// image_ensure_test.go — the staging leg stages into the store of the RESOLVED run engine.
+// The retired subject hardcoded podman and transferred across stores; these arms pin the
+// replacement: the configured engine is the only store consulted, `build:ensure` receives that
+// same engine, and an unset word falls to the schema default.
 
 func TestEnsureImagePresent(t *testing.T) {
 	orig := container.LocalImageExists
-	defer func() { container.LocalImageExists = orig }()
+	t.Cleanup(func() { container.LocalImageExists = orig })
 
-	t.Run("run engine has image", func(t *testing.T) {
-		container.LocalImageExists = func(engine, ref string) bool { return engine == podRunEngine }
-		if err := ensureImagePresent(t.Context(), nil, "myimage:latest", "podman"); err != nil {
-			t.Errorf("expected no error, got: %v", err)
-		}
-	})
-
-	t.Run("cross engine already in run engine", func(t *testing.T) {
-		container.LocalImageExists = func(engine, ref string) bool { return engine == podRunEngine }
-		if err := ensureImagePresent(t.Context(), nil, "myimage:latest", "docker"); err != nil {
-			t.Errorf("expected no error, got: %v", err)
-		}
-	})
-
-	t.Run("cross engine needs transfer, check order", func(t *testing.T) {
-		var checks []string
+	t.Run("configured engine has image", func(t *testing.T) {
+		var probed []string
 		container.LocalImageExists = func(engine, ref string) bool {
-			checks = append(checks, engine)
-			return engine == "docker" // present only in the other engine’s store
+			probed = append(probed, engine)
+			return engine == "containerd"
 		}
-		// TransferImage will fail (no real docker/podman), but we verify the check order:
-		// the pod's own engine (podman) first, then the RUN engine handed in (docker).
-		_ = ensureImagePresent(t.Context(), nil, "myimage:latest", "docker")
-		if len(checks) < 2 {
-			t.Fatalf("expected at least 2 ImageExists checks, got %d", len(checks))
+		if err := ensureImagePresent(t.Context(), nil, "myimage:latest", "containerd"); err != nil {
+			t.Errorf("expected no error, got: %v", err)
 		}
-		if checks[0] != podRunEngine {
-			t.Errorf("first check should be run engine (%s), got %s", podRunEngine, checks[0])
-		}
-		if checks[1] != "docker" {
-			t.Errorf("second check should be the RUN engine (docker), got %s", checks[1])
+		if len(probed) != 1 || probed[0] != "containerd" {
+			t.Errorf("staging must probe exactly the configured engine, got %q", probed)
 		}
 	})
 
-	t.Run("podman to docker transfer attempted", func(t *testing.T) {
-		// This test requires docker to be in PATH (it execs "docker load"); podRunEngine is
-		// always "podman", so this exercises the transfer FROM docker TO podman (the deleted
-		// core test's "podman to docker transfer" case inverted RunEngine to docker — no longer
-		// expressible now that RunEngine is hardcoded, so this proves the same transfer LEG
-		// instead: the run engine handed in is docker and the pod runs on podman, image present only in docker).
-		if _, err := exec.LookPath("docker"); err != nil {
-			t.Skip("docker not available, skipping cross-engine transfer test")
+	t.Run("unset engine uses the schema default", func(t *testing.T) {
+		var probed []string
+		container.LocalImageExists = func(engine, ref string) bool {
+			probed = append(probed, engine)
+			return true
 		}
-		container.LocalImageExists = func(engine, ref string) bool { return engine == "docker" }
-		err := ensureImagePresent(t.Context(), nil, "myimage:latest", "docker")
-		if err == nil {
-			t.Fatal("expected error from TransferImage (no real engine)")
+		if err := ensureImagePresent(t.Context(), nil, "myimage:latest", ""); err != nil {
+			t.Errorf("expected no error, got: %v", err)
 		}
-		if strings.Contains(err.Error(), "not found") {
-			t.Errorf("should have attempted transfer, not reported not-found: %v", err)
+		if len(probed) != 1 || probed[0] != spec.DefaultContainerEngine {
+			t.Errorf("unset engine must resolve to the schema default %q, got %q", spec.DefaultContainerEngine, probed)
 		}
 	})
 
-	t.Run("image missing everywhere reaches build:ensure tier", func(t *testing.T) {
+	t.Run("image missing reaches build:ensure tier", func(t *testing.T) {
 		container.LocalImageExists = func(engine, ref string) bool { return false }
 		var err error
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
 					// Reached dispatchBuildEnsurePeer's ex.InvokeProvider with a nil test
-					// executor — proves tier 1+2 were correctly exhausted first, matching
-					// the deleted core test's "cross engine missing from both" assertion
-					// that ALL tiers were tried before failing. build:ensure's own
-					// resolve/decode behavior is out of this package's test scope.
+					// executor — proves the local-store tier was exhausted first.
+					// build:ensure's own resolve/decode behavior is out of this package's
+					// test scope.
 					err = errors.New("reached build:ensure tier (nil-executor panic, expected)")
 				}
 			}()
-			err = ensureImagePresent(t.Context(), nil, "myimage:latest", "podman")
+			err = ensureImagePresent(t.Context(), nil, "myimage:latest", "containerd")
 		}()
 		if err == nil {
 			t.Fatal("expected an error (either spec.ErrImageNotLocal or the tier-3 panic marker)")

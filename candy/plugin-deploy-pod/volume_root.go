@@ -38,24 +38,10 @@ import (
 const volumeRootScratchPath = "/charly-volume-root"
 
 // Three different emitters can create the container a deploy's named volumes are attached to, and
-// each guards its own keep-id flag. These are their conditions, each named for its emitter; the two
-// that live in this package ARE the emitters' conditions (called from the argv builder itself), so
-// they cannot drift, and the third — sdk/deploykit/quadlet.go's `UserNS=` line, which cannot import
-// this package — is mirrored here and pinned by a test.
-
-// startArgsKeepID is buildStartArgs' condition, shared with buildShellArgs (the `charly shell` plan,
-// resolve_f12.go's resolvePodShellPlan): the resolved engine decides, and only podman has keep-id.
-func startArgsKeepID(engine string, bindMounts int) bool {
-	return engine == "podman" && bindMounts > 0
-}
-
-// directPodmanKeepID is directPodmanArgs' condition. The direct path never consults the resolved
-// engine: runConfigDirect execs `podman` itself (`exec.Command("podman", ...)`,
-// config_setup_helpers.go), so the engine cannot vary here and the condition tests the deploy user
-// instead.
-func directPodmanKeepID(uid, bindMounts int) bool {
-	return uid > 0 && bindMounts > 0
-}
+// each guards its own keep-id flag. These are their conditions, each named for its emitter; the
+// direct/start builders call engineKeepID (the capability fact) directly, so they cannot drift,
+// and the quadlet emitter — sdk/deploykit/quadlet.go's `UserNS=` line, which cannot import this
+// package — is mirrored here and pinned by a test.
 
 // quadletKeepID mirrors sdk/deploykit/quadlet.go's `UserNS=keep-id:uid=…,gid=…` line: a quadlet
 // deploy is podman-only, so the emitter tests neither the engine nor the deploy user, only whether
@@ -71,17 +57,14 @@ func quadletKeepID(bindMounts int) bool {
 // that from its own standard-mapping helper — where that same host user appears as container root —
 // so it steps aside rather than write an owner the keep-id runtime could not use.
 //
-// The answer is deliberately an OVER-approximation (R3: one predicate, one answer per mode): in
-// direct mode two builders can create the container — `charly config` runs directPodmanArgs and
-// `charly start` runs buildStartArgs — so standing aside when EITHER would emit keep-id is the safe
-// side. The cost of the over-approximation is only that such a deploy keeps the stale root this
-// reconcile exists to repair; the cost of guessing the other way is an owner the live container
-// cannot write as, which is the failure being fixed.
-func volumeRootKeepID(runMode, engine string, uid, bindMounts int) bool {
-	if runMode == "direct" {
-		return directPodmanKeepID(uid, bindMounts) || startArgsKeepID(engine, bindMounts)
+// The direct and systemd-unit modes both launch through the engine `start_plan` body, so their
+// keep-id answer IS the capability fact (engineKeepID). Quadlet is the one emitter with its own
+// generator and its own condition.
+func volumeRootKeepID(runMode, engine string, bindMounts int) bool {
+	if runMode == "quadlet" {
+		return quadletKeepID(bindMounts)
 	}
-	return quadletKeepID(bindMounts)
+	return engineKeepID(engine, bindMounts)
 }
 
 // volumeRootReconcileArgs builds the argv of the throwaway container that gives one named volume a

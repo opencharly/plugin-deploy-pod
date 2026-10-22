@@ -48,9 +48,9 @@ func gpuProbe(ctx context.Context, ex *sdk.Executor, action string) spec.GpuProb
 }
 
 // detectDevices probes the host for GPU/device nodes, logs them, and ensures the NVIDIA CDI spec
-// when a GPU is present and the engine is podman — the relocated body of the deleted
-// hostBuildPodConfigDetectDevices seam. noAutoDetect skips detection (and therefore the CDI
-// ensure, which only fires on a detected GPU); engine "podman" alongside a detection triggers the
+// when a GPU is present and the engine's GPUArgStyle is "cdi" (podman) — the relocated body of the
+// deleted hostBuildPodConfigDetectDevices seam. noAutoDetect skips detection (and therefore the CDI
+// ensure, which only fires on a detected GPU); a CDI engine alongside a detection triggers the
 // ensure-cdi probe (the pod lifecycle's resolvePodRuntimeImage step bundles it into the SAME
 // call, R3 — the former seam's exact sequencing).
 func detectDevices(ctx context.Context, ex *sdk.Executor, noAutoDetect bool, engine string) spec.DetectedDevices {
@@ -62,7 +62,7 @@ func detectDevices(ctx context.Context, ex *sdk.Executor, noAutoDetect bool, eng
 		}
 		logDetectedDevices(detected)
 	}
-	if detected.GPU && engine == "podman" {
+	if detected.GPU && engineUsesCDI(engine) {
 		gpuProbe(ctx, ex, "ensure-cdi")
 	}
 	return detected

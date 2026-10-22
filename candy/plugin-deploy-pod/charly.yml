@@ -2,8 +2,10 @@ plugin-deploy-pod:
     candy:
         description: |-
             OUT-OF-TREE charly DEPLOY plugin serving the `pod` deploy SUBSTRATE —
-            `target: pod` (the DEFAULT substrate: a deployment run as a container image via
-            quadlet/podman). A standalone Go module (go.mod + main.go) served over go-plugin
+            `target: pod` (the DEFAULT substrate: a deployment run as a container image on the
+            resolved engine — podman's quadlet mode, containerd's generated systemd unit, or a
+            direct launch, each from the engine `start_plan` / `unit_emit` ops). A standalone Go
+            module (go.mod + main.go) served over go-plugin
             gRPC via the charly plugin SDK; charly's loader host-builds the provider binary
             and connects it OUT-OF-PROCESS (LocalTransport). The host's plugin-side deploy
             target Invokes it (OpExecute) with the deployment's InstallPlan VIEWS + a venue

@@ -1,8 +1,17 @@
 # plugin-deploy-pod
 
 The `pod` deploy substrate for OpenCharly — `target: pod`, the DEFAULT substrate
-(a deployment run as a container image via quadlet/podman), served
+(a deployment run as a container image on the resolved container engine), served
 out-of-process (`deploy:pod`).
+
+The launch argv and the supervision file come from the ENGINE provider-class ops
+(`start_plan` / `unit_emit`, `spec/container/engine_ops.go`), so the substrate is
+engine-agnostic by construction: `engine.run=podman` uses podman's quadlet run
+mode, and `engine.run=containerd` (driven through nerdctl) uses a generated
+systemd unit that wraps the foreground `nerdctl run` argv, carrying the runtime
+handler and daemon address/namespace from the capability table. Rootful containerd
+is refused with a remedy (system-scope units and a rootful image store are not
+implemented here) rather than silently run rootless.
 
 The plugin is a standalone Go module the charly loader host-builds and serves
 over go-plugin gRPC. It is the pod-substrate sibling of `plugin-deploy-vm`.
@@ -32,7 +41,9 @@ install steps INTO the image at BUILD time:
   owned by the host lifecycle hook's `PostTeardown`.
 - The pod config-WRITE also lives here: `OpConfigWrite` renders the
   quadlet/`.pod`/sidecar/tunnel file contents and writes them at the host-resolved
-  absolute paths + exact modes.
+  absolute paths + exact modes. For the `systemd-unit` run mode (containerd), the
+  file is the engine `unit_emit` service and the file count is one (sidecars
+  require the quadlet run mode).
 
 ## How to use it
 

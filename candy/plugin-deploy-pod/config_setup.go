@@ -87,9 +87,15 @@ func runPodConfigSetup(ctx context.Context, ex *sdk.Executor, c *spec.PodConfigS
 		return err
 	}
 	switch rt.RunMode {
-	case "quadlet", "direct":
+	case "quadlet", "systemd-unit", "direct":
 	default:
-		return fmt.Errorf("charly config requires run_mode=quadlet or direct (current: %s)", rt.RunMode)
+		return fmt.Errorf("charly config requires run_mode=quadlet, systemd-unit, or direct (current: %s)", rt.RunMode)
+	}
+	// A rootful target is explicit, and this plugin cannot finish one safely: the image store
+	// staging runs rootless and system-scope unit emission is unimplemented. Refuse with the
+	// remedy rather than silently deploying the rootless arm the operator did not ask for.
+	if rootfulUnsupported(rt) {
+		return rootfulRefusal(rt.RunEngine, rt.RunMode)
 	}
 	if c.Box == "" {
 		return fmt.Errorf("image name is required")
@@ -188,7 +194,7 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, c
 	// ExtractMetadata PLUGIN-SIDE (#55 coneC-dsh — the pod-config-ensure-image host seam shrinks to
 	// the host-coupled ensureImagePresent leg; the deploykit label extract runs here, shedding the
 	// host leg's deploykit import).
-	metaPtr, err := deploykit.ExtractMetadata("podman", imageRef)
+	metaPtr, err := deploykit.ExtractMetadata(rt.RunEngine, imageRef)
 	if err != nil {
 		return err
 	}
@@ -249,7 +255,7 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, c
 	// emission path below (the direct return and the quadlet write) and before any start, so the
 	// ownership is right however the container is created; `charly remove` keeps named volumes, so
 	// the re-run of an existing deploy is the normal case this must repair.
-	if err := reconcileNamedVolumeRoots(ctx, ex, rt.RunEngine, volumeRootKeepID(rt.RunMode, rt.RunEngine, uid, len(bindMounts)), uid, gid, imageRef, volumes); err != nil {
+	if err := reconcileNamedVolumeRoots(ctx, ex, rt.RunEngine, volumeRootKeepID(rt.RunMode, rt.RunEngine, len(bindMounts)), uid, gid, imageRef, volumes); err != nil {
 		return err
 	}
 
@@ -418,46 +424,56 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, c
 	deploySaveState(ctx, ex, c.Box, c.Instance, saveInput)
 
 	if rt.RunMode == "direct" {
-		return runConfigDirect(qcfg, bindMounts, resolvedSidecars, tunnelCfg)
+		return runConfigDirect(rt, qcfg, bindMounts, resolvedSidecars, tunnelCfg)
 	}
 
-	qdir, err := kit.QuadletDir()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(qdir, 0755); err != nil {
-		return fmt.Errorf("creating quadlet directory: %w", err)
-	}
-	writeReq := spec.PodConfigWriteRequest{ContainerPath: filepath.Join(qdir, kit.QuadletFilenameInstance(c.Box, c.Instance))}
-	if len(resolvedSidecars) > 0 {
-		writeReq.PodPath = filepath.Join(qdir, kit.PodQuadletFilenameInstance(c.Box, c.Instance))
-		writeReq.SidecarPaths = make(map[string]string, len(resolvedSidecars))
-		for _, sc := range resolvedSidecars {
-			writeReq.SidecarPaths[sc.Name] = filepath.Join(qdir, kit.SidecarQuadletFilenameInstance(c.Box, c.Instance, sc.Name))
+	if rt.RunMode == "systemd-unit" {
+		written, werr := writeSystemdUnitConfig(rt, qcfg, bindMounts, resolvedSidecars, tunnelCfg)
+		if werr != nil {
+			return werr
 		}
-	}
-	if tunnelCfg != nil && tunnelCfg.Provider == "cloudflare" {
-		svcDir, err := kit.SystemdUserDir()
+		for _, p := range written {
+			fmt.Fprintf(os.Stderr, "Wrote %s\n", p)
+		}
+	} else {
+		qdir, err := kit.QuadletDir()
 		if err != nil {
 			return err
 		}
-		if err := os.MkdirAll(svcDir, 0755); err != nil {
-			return fmt.Errorf("creating systemd user directory: %w", err)
+		if err := os.MkdirAll(qdir, 0755); err != nil {
+			return fmt.Errorf("creating quadlet directory: %w", err)
 		}
-		writeReq.TunnelPath = filepath.Join(svcDir, deploykit.TunnelServiceFilename(c.Box))
-		writeReq.CloudflaredCfgPath = tunnelConfigPath(tunnelCfg.TunnelName)
-	}
-	qcfgJSON, err := json.Marshal(qcfg)
-	if err != nil {
-		return fmt.Errorf("marshaling pod config for write: %w", err)
-	}
-	writeReq.PodConfigJSON = qcfgJSON
-	writeReply, err := podConfigWriteSelf(writeReq)
-	if err != nil {
-		return fmt.Errorf("writing pod config files: %w", err)
-	}
-	for _, p := range writeReply.WrittenPaths {
-		fmt.Fprintf(os.Stderr, "Wrote %s\n", p)
+		writeReq := spec.PodConfigWriteRequest{ContainerPath: filepath.Join(qdir, kit.QuadletFilenameInstance(c.Box, c.Instance))}
+		if len(resolvedSidecars) > 0 {
+			writeReq.PodPath = filepath.Join(qdir, kit.PodQuadletFilenameInstance(c.Box, c.Instance))
+			writeReq.SidecarPaths = make(map[string]string, len(resolvedSidecars))
+			for _, sc := range resolvedSidecars {
+				writeReq.SidecarPaths[sc.Name] = filepath.Join(qdir, kit.SidecarQuadletFilenameInstance(c.Box, c.Instance, sc.Name))
+			}
+		}
+		if tunnelCfg != nil && tunnelCfg.Provider == "cloudflare" {
+			svcDir, err := kit.SystemdUserDir()
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(svcDir, 0755); err != nil {
+				return fmt.Errorf("creating systemd user directory: %w", err)
+			}
+			writeReq.TunnelPath = filepath.Join(svcDir, deploykit.TunnelServiceFilename(c.Box))
+			writeReq.CloudflaredCfgPath = tunnelConfigPath(tunnelCfg.TunnelName)
+		}
+		qcfgJSON, err := json.Marshal(qcfg)
+		if err != nil {
+			return fmt.Errorf("marshaling pod config for write: %w", err)
+		}
+		writeReq.PodConfigJSON = qcfgJSON
+		writeReply, err := podConfigWriteSelf(writeReq)
+		if err != nil {
+			return fmt.Errorf("writing pod config files: %w", err)
+		}
+		for _, p := range writeReply.WrittenPaths {
+			fmt.Fprintf(os.Stderr, "Wrote %s\n", p)
+		}
 	}
 
 	if tunnelCfg != nil && tunnelCfg.Provider == "cloudflare" {

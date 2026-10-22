@@ -482,45 +482,35 @@ func writeDirectDeployMarker(m directDeployMarker) error {
 	return os.WriteFile(path, data, 0o600)
 }
 
-// directPodmanArgs mirrors the former charly-core function of the same name VERBATIM.
-func directPodmanArgs(qcfg deploykit.QuadletConfig, bindMounts []deploykit.ResolvedBindMount) []string {
+// directRunArgs builds the direct-mode launch argv through the engine `start_plan` body. The
+// former direct builder composed a podman-shaped argv and exec'd `podman` unconditionally, which
+// meant a direct-mode deploy ignored the resolved engine (containerd/docker still ran podman).
+// The engine is now a parameter, the argv comes from the engine class, and the caller executes
+// that argv.
+func directRunArgs(qcfg deploykit.QuadletConfig, bindMounts []deploykit.ResolvedBindMount, engine string, rootful bool) ([]string, error) {
 	name := kit.ContainerNameInstance(qcfg.BoxName, qcfg.Instance)
-	args := []string{"run", "-d", "--name", name, "--hostname", name, "--restart=always"}
-	if qcfg.Network != "" {
-		args = append(args, "--network", qcfg.Network)
-	} else {
-		args = append(args, "--network", "charly")
+	network := qcfg.Network
+	if network == "" {
+		network = "charly"
 	}
-	for _, p := range qcfg.Ports {
-		if qcfg.BindAddress != "" && qcfg.BindAddress != "0.0.0.0" {
-			args = append(args, "-p", qcfg.BindAddress+":"+p)
-		} else {
-			args = append(args, "-p", p)
-		}
-	}
-	for _, v := range qcfg.Volumes {
-		args = append(args, "-v", v.VolumeName+":"+v.ContainerPath)
-	}
-	for _, bm := range bindMounts {
-		args = append(args, "-v", bm.HostPath+":"+bm.ContPath)
-	}
-	for _, e := range qcfg.Env {
-		args = append(args, "-e", e)
-	}
-	if qcfg.EnvFile != "" {
-		args = append(args, "--env-file", qcfg.EnvFile)
-	}
-	args = append(args, deploykit.SecurityArgs(qcfg.Security)...)
-	if directPodmanKeepID(qcfg.UID, len(bindMounts)) {
-		args = append(args, "--userns", fmt.Sprintf("keep-id:uid=%d,gid=%d", qcfg.UID, qcfg.GID))
-	}
-	args = append(args, qcfg.ImageRef)
-	args = append(args, qcfg.Entrypoint...)
-	return args
+	argv, _, err := engineRunArgv(engine, rootful, podEngineRun{
+		Image: qcfg.ImageRef, Name: name, Network: network,
+		Hostname: name, Restart: "always",
+		Detach: true,
+		KeepID: engineKeepID(engine, len(bindMounts)),
+		UID:    qcfg.UID, GID: qcfg.GID,
+		Ports:      localizedPorts(qcfg.Ports, qcfg.BindAddress),
+		Volumes:    volumeArgs(qcfg.Volumes, bindMounts),
+		Env:        qcfg.Env,
+		EnvFiles:   envFiles(qcfg.EnvFile),
+		Security:   qcfg.Security,
+		Entrypoint: qcfg.Entrypoint,
+	})
+	return argv, err
 }
 
-// runConfigDirect mirrors the former BoxConfigSetupCmd.runConfigDirect VERBATIM.
-func runConfigDirect(qcfg deploykit.QuadletConfig, bindMounts []deploykit.ResolvedBindMount, sidecars []deploykit.ResolvedSidecar, tunnelCfg *spec.TunnelConfig) error {
+// runConfigDirect mirrors the former BoxConfigSetupCmd.runConfigDirect, now engine-driven.
+func runConfigDirect(rt *kit.ResolvedRuntime, qcfg deploykit.QuadletConfig, bindMounts []deploykit.ResolvedBindMount, sidecars []deploykit.ResolvedSidecar, tunnelCfg *spec.TunnelConfig) error {
 	if len(sidecars) > 0 {
 		fmt.Fprintf(os.Stderr, "Warning: sidecars are not supported in direct mode (skipping); use run_mode=quadlet for sidecar deploys.\n")
 	}
@@ -530,14 +520,23 @@ func runConfigDirect(qcfg deploykit.QuadletConfig, bindMounts []deploykit.Resolv
 	if deploykit.HasEncryptedBindMounts(bindMounts) {
 		fmt.Fprintf(os.Stderr, "Warning: encrypted bind mounts require systemd-run; encrypted volumes will not be initialized in direct mode.\n")
 	}
+	if rootfulUnsupported(rt) {
+		return rootfulRefusal(rt.RunEngine, rt.RunMode)
+	}
+	engine := rt.RunEngine
 	name := kit.ContainerNameInstance(qcfg.BoxName, qcfg.Instance)
-	_ = exec.Command("podman", "stop", name).Run()
-	_ = exec.Command("podman", "rm", "-f", name).Run()
-	args := directPodmanArgs(qcfg, bindMounts)
-	cmd := exec.Command("podman", args...)
+	stop := engineStopArgv(engine, name)
+	_ = exec.Command(stop[0], stop[1:]...).Run()
+	rm := engineRemoveArgv(engine, name)
+	_ = exec.Command(rm[0], rm[1:]...).Run()
+	args, err := directRunArgs(qcfg, bindMounts, engine, podRootful(rt))
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(args[0], args[1:]...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("podman run %s failed: %w\n%s", name, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("%s run %s failed: %w\n%s", engine, name, err, strings.TrimSpace(string(out)))
 	}
 	cid := strings.TrimSpace(string(out))
 	fmt.Fprintf(os.Stderr, "Started %s (direct mode, container=%s)\n", name, cid[:min(12, len(cid))])
@@ -601,7 +600,7 @@ func provisionData(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntim
 		if err := ensureImagePresent(ctx, ex, dataRef, rt.RunEngine); err != nil {
 			return fmt.Errorf("extracting metadata from data image %s: %w", dataRef, err)
 		}
-		dm, err := deploykit.ExtractMetadata("podman", dataRef)
+		dm, err := deploykit.ExtractMetadata(dataEngine, dataRef)
 		if err != nil || dm == nil {
 			return fmt.Errorf("extracting metadata from data image %s: %w", dataRef, err)
 		}
@@ -706,7 +705,7 @@ func updateAllDeployedQuadlets(ctx context.Context, ex *sdk.Executor, rt *kit.Re
 			fmt.Fprintf(os.Stderr, "Warning: could not read metadata for %s, skipping quadlet update\n", key)
 			continue
 		}
-		metaPtr, err := deploykit.ExtractMetadata("podman", imageRef)
+		metaPtr, err := deploykit.ExtractMetadata(rt.RunEngine, imageRef)
 		if err != nil || metaPtr == nil {
 			continue
 		}
@@ -1029,50 +1028,29 @@ func mergeVolumeConfigsLocal(base, overrides []spec.DeployVolume) []spec.DeployV
 // portable and live in sdk/deploykit (enc_probe.go) as IsEncryptedMounted/CipherPopulatedPlainEmpty/
 // VerifyBindMounts — every call site below repoints there directly, one shared implementation.
 
-// buildStartArgs is the plugin-side twin of the equivalent charly-core function P13-KERNEL
-// step-4(ii) moved here VERBATIM (the direct-mode `podman run -d …` argv); Cutover B unit 2
-// confirmed the core copy was dead (zero non-test callers) and deleted it — this is now the ONLY
-// live implementation.
-func buildStartArgs(engine, imageRef string, uid, gid int, ports []string, name string, volumes []deploykit.VolumeMount, bindMounts []deploykit.ResolvedBindMount, gpu bool, bindAddr string, envVars []string, security spec.SecurityConfig, entrypoint []string, workingDir string, network ...string) []string {
-	binary := kit.EngineBinary(engine)
-	args := []string{
-		binary, "run", "-d", "--rm",
-		"--name", name,
-		"--hostname", name,
-		"-w", workingDir,
+// buildStartArgs is the pod's detached-launch argv builder for the direct run mode. It routes
+// through the engine `start_plan` body (engine_ops.go): the engine word selects the binary, the
+// keep-id fact, the GPU flag style and the runtime handler, so a containerd/docker deploy no
+// longer runs a podman argv. rootful selects the engine's mode-specific workload-user fact.
+func buildStartArgs(engine string, rootful bool, imageRef string, uid, gid int, ports []string, name string, volumes []deploykit.VolumeMount, bindMounts []deploykit.ResolvedBindMount, gpu bool, bindAddr string, envVars []string, security spec.SecurityConfig, entrypoint []string, workingDir string, network ...string) ([]string, error) {
+	net := ""
+	if len(network) > 0 {
+		net = network[0]
 	}
-	if len(network) > 0 && network[0] != "" {
-		args = append(args, "--network", network[0])
-	}
-	if gpu {
-		args = append(args, kit.GPURunArgs(engine)...)
-	}
-	args = append(args, deploykit.SecurityArgs(security)...)
-	for _, port := range ports {
-		args = append(args, "-p", deploykit.LocalizePort(port, bindAddr))
-	}
-	for _, vol := range volumes {
-		args = append(args, "-v", fmt.Sprintf("%s:%s", vol.VolumeName, vol.ContainerPath))
-	}
-	for _, bm := range bindMounts {
-		args = append(args, "-v", fmt.Sprintf("%s:%s", bm.HostPath, bm.ContPath))
-	}
-	for _, m := range security.Mounts {
-		if after, ok := strings.CutPrefix(m, "tmpfs:"); ok {
-			args = append(args, "--tmpfs", after)
-		} else {
-			args = append(args, "-v", m)
-		}
-	}
-	if startArgsKeepID(engine, len(bindMounts)) {
-		args = append(args, fmt.Sprintf("--userns=keep-id:uid=%d,gid=%d", uid, gid))
-	}
-	for _, e := range envVars {
-		args = append(args, "-e", e)
-	}
-	args = append(args, imageRef)
-	args = append(args, entrypoint...)
-	return args
+	argv, _, err := engineRunArgv(engine, rootful, podEngineRun{
+		Image: imageRef, Name: name, Network: net,
+		WorkingDir: workingDir, Hostname: name,
+		Detach: true, Remove: true,
+		KeepID: engineKeepID(engine, len(bindMounts)),
+		UID:    uid, GID: gid,
+		Ports:      localizedPorts(ports, bindAddr),
+		Volumes:    volumeArgs(volumes, bindMounts),
+		Env:        envVars,
+		Security:   security,
+		GPU:        gpu,
+		Entrypoint: entrypoint,
+	})
+	return argv, err
 }
 
 // appendGroupsForAMDGPU / appendAutoDetectedEnv / appendEnvUnique were ported from
