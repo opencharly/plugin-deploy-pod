@@ -45,10 +45,10 @@ type podEngineRun struct {
 }
 
 // engineRunArgv builds a launch argv through the engine class's `start_plan` body and returns
-// the engine's own run mode. A ROOTFUL target carries the capability row's privilege_prefix
-// (data, never a hard-coded escalation command); every launch of an engine that declares
-// runtime_handlers carries `--runtime <handler>` selected from that set, so a containerd launch
-// never relies on the daemon's default handler.
+// the engine's own run mode. It is always the ROOTLESS argv: a rootful target that would need
+// a privilege prefix is refused by rootfulUnsupported before any caller reaches here. Every
+// launch of an engine that declares runtime_handlers carries `--runtime <handler>` selected
+// from that set, so a containerd launch never relies on the daemon's default handler.
 func engineRunArgv(engine string, rootful bool, r podEngineRun) ([]string, string, error) {
 	c, ok := container.EngineCapabilityFor(engine)
 	if !ok {
@@ -86,6 +86,7 @@ func engineRunArgv(engine string, rootful bool, r podEngineRun) ([]string, strin
 		// uid/gid mapping, so the full spelling is emitted here from the SAME capability fact.
 		extra = append(extra, fmt.Sprintf("%s:uid=%d,gid=%d", c.UsernsKeepIDArg, r.UID, r.GID))
 	}
+	extra = append(extra, envArgs(r.Env)...)
 	extra = append(extra, r.ExtraArgs...)
 
 	req := spec.EngineStartPlanRequest{
@@ -98,7 +99,6 @@ func engineRunArgv(engine string, rootful bool, r podEngineRun) ([]string, strin
 		Detach:    r.Detach,
 		Ports:     r.Ports,
 		Volumes:   r.Volumes,
-		Env:       envSliceToStrMap(r.Env),
 		EnvFiles:  r.EnvFiles,
 		ExtraArgs: extra,
 		ImageArgs: r.Entrypoint,
@@ -119,12 +119,10 @@ func engineRunArgv(engine string, rootful bool, r podEngineRun) ([]string, strin
 		return nil, "", fmt.Errorf("engine start_plan (%s): %s", engine, rep.Error)
 	}
 	argv := prependEngineGlobalArgs(c, rep.Argv)
-	if rootful && len(argv) > 0 {
-		prefix := strings.Fields(c.PrivilegePrefix)
-		if len(prefix) > 0 {
-			argv = append(prefix, argv...)
-		}
-	}
+	// No privilege_prefix is applied here: rootfulUnsupported refuses every rootful engine
+	// that declares one (containerd), and an engine without one has an empty prefix, so this
+	// argv is always the rootless form. Adding a prefix on an unreachable arm would be a
+	// silent escalation path; the refusal is the single rootful answer.
 	return argv, rep.RunMode, nil
 }
 
@@ -241,19 +239,20 @@ func rootfulUnsupported(rt *kit.ResolvedRuntime) bool {
 	return ok && c.PrivilegePrefix != ""
 }
 
-// envSliceToStrMap converts the pod's ordered `KEY=VALUE` env list to the request's map form.
-// start_plan emits `-e KEY=VALUE` from it; order is not significant to the engine. A bare
-// `KEY` (inherit-from-host) has no place in the map: the start_plan request only carries
-// KEY=VALUE, and writeSystemdUnitConfig refuses a bare entry rather than dropping it.
-func envSliceToStrMap(env []string) spec.StrMap {
+// envArgs renders the pod's env entries as engine CLI `-e` arguments, VERBATIM. An engine
+// accepts both forms: `KEY=VALUE` sets the variable, and a bare `KEY` inherits it from the
+// process that launches the engine. Both are therefore one shape here — the entry string —
+// and neither is reinterpreted. The entries cannot ride `EngineStartPlanRequest.Env`: that
+// field is a KEY→VALUE map, which has no representation for an inherit entry and silently
+// drops one (#38, the #37 regression). They ride ExtraArgs instead, which start_plan appends
+// after env-files and before the image, so ordering and precedence match the map emission.
+func envArgs(env []string) []string {
 	if len(env) == 0 {
 		return nil
 	}
-	out := make(spec.StrMap, len(env))
-	for _, kv := range env {
-		if k, v, ok := strings.Cut(kv, "="); ok {
-			out[k] = v
-		}
+	out := make([]string, 0, len(env)*2)
+	for _, entry := range env {
+		out = append(out, "-e", entry)
 	}
 	return out
 }

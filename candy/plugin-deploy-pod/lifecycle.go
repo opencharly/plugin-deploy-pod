@@ -193,16 +193,20 @@ func podExec(ctx context.Context, exec *sdk.Executor, p lifecycleParams) (*pb.In
 }
 
 // podStartCommand resolves the start command for a plan: direct → the fully-built engine
-// argv; direct-deploy marker → `podman start <ctr>`; a unit run mode (quadlet OR
-// systemd-unit — both are supervised by systemd) → `systemctl --user start <svc>`.
-// Explicit on IsUnitRunMode so a new unit mode cannot fall into the exec-argv branch, and
-// an unknown mode is refused rather than exec'd as an empty argv.
+// argv; direct-deploy marker → `<engine> start <ctr>` through the plan's resolved engine
+// binary; a unit run mode (quadlet OR systemd-unit — both are supervised by systemd) →
+// `systemctl --user start <svc>`. Explicit on IsUnitRunMode so a new unit mode cannot fall
+// into the exec-argv branch, and an unknown mode is refused rather than exec'd as an empty
+// argv.
 func podStartCommand(plan spec.PodLifecyclePlan) (cmd, label, target string, err error) {
 	switch {
 	case plan.Mode == "direct":
 		return shellJoin(plan.RunArgv), "start (direct)", plan.ContainerName, nil
 	case plan.DirectDeploy:
-		return "podman start " + shellquote.ShellQuote(plan.ContainerName), "start (direct-deploy)", plan.ContainerName, nil
+		if plan.EngineBin == "" {
+			return "", "", "", fmt.Errorf("direct-deploy start has no engine binary: the plan carries no EngineBin")
+		}
+		return plan.EngineBin + " start " + shellquote.ShellQuote(plan.ContainerName), "start (direct-deploy)", plan.ContainerName, nil
 	case kit.IsUnitRunMode(plan.Mode):
 		return "systemctl --user start " + shellquote.ShellQuote(plan.SvcName), "start", plan.SvcName, nil
 	default:
@@ -267,7 +271,7 @@ func tunnelReplyError(resJSON []byte) error {
 
 // shellJoin renders an argv into a single shell-safe command string (each token shellquote.ShellQuote'd)
 // for the served host executor, which runs a script string rather than an argv (the direct-mode
-// `podman run -d …` path — buildStartArgs produced the argv host-side).
+// detached-launch path — buildStartArgs produced the engine-resolved argv host-side).
 func shellJoin(argv []string) string {
 	quoted := make([]string, len(argv))
 	for i, a := range argv {
