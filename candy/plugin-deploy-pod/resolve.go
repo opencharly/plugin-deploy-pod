@@ -3,6 +3,8 @@ package deploypod
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/deploykit"
@@ -19,18 +21,63 @@ import (
 // coupled sub-steps (image ensure, device detection, deploy-config load, box-engine lookup, the
 // enc-ensure/enc-unmount/container-tunnel credential/registry-coupled bundles).
 
-// resolvePodStartPlan builds the pod START plan. Mirrors the former StartCmd.Run's quadlet/direct
-// branch: quadlet mode threads the systemd unit name; direct mode threads the fully-built
-// `podman run -d` argv (buildStartArgs).
+// resolvePodStartPlan builds the pod START plan. The run mode is the runtime's resolved one:
+// quadlet threads the systemd unit name, systemd-unit threads the engine-emitted service, and
+// direct threads the engine `start_plan` argv.
 func resolvePodStartPlan(ctx context.Context, ex *sdk.Executor, box, instance string, opts spec.PodStartOpts) (*spec.PodLifecyclePlan, error) {
 	rt, err := kit.ResolveRuntime()
 	if err != nil {
 		return nil, err
 	}
-	if rt.RunMode == "quadlet" {
+	switch rt.RunMode {
+	case "quadlet":
 		return resolvePodStartQuadlet(ctx, ex, box, instance, rt)
+	case "systemd-unit":
+		return resolvePodStartSystemdUnit(ctx, ex, box, instance, rt)
+	default:
+		return resolvePodStartDirect(ctx, ex, box, instance, rt, opts)
 	}
-	return resolvePodStartDirect(ctx, ex, box, instance, rt, opts)
+}
+
+// resolvePodStartSystemdUnit resolves the systemd-unit-mode start plan: the engine's emitted
+// .service (unit_emit) is started with `systemctl --user start <svc>`, exactly like the quadlet
+// path starts podman's generated unit. The unit file's existence is the "configured" signal.
+func resolvePodStartSystemdUnit(ctx context.Context, ex *sdk.Executor, box, instance string, rt *kit.ResolvedRuntime) (*spec.PodLifecyclePlan, error) {
+	if rootfulUnsupported(rt) {
+		return nil, rootfulRefusal(rt.RunEngine, rt.RunMode)
+	}
+	svc := kit.ServiceNameInstance(box, instance)
+	svcDir, err := kit.SystemdUserDir()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(filepath.Join(svcDir, svc)); err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("not configured; run 'charly config %s' first", box)
+		}
+		return nil, err
+	}
+	engine, err := boxEngineForDeploy(ctx, ex, box, instance, rt.RunEngine)
+	if err != nil {
+		return nil, err
+	}
+	dc, err := loadDeploy(ctx, ex, "charly start")
+	if err != nil {
+		return nil, err
+	}
+	plan := &spec.PodLifecyclePlan{
+		Mode:          "systemd-unit",
+		SvcName:       svc,
+		ContainerName: kit.ContainerNameInstance(box, instance),
+		EngineBin:     kit.EngineBinary(engine),
+	}
+	encJSON, err := resolvePodEncEnsurePlan(ctx, ex, dc, box, instance, false)
+	if err != nil {
+		return nil, err
+	}
+	plan.Enc = encJSON
+	plan.Tunnel = resolvePodTunnelPlan(dc, box, instance)
+	return plan, nil
 }
 
 // resolvePodStartQuadlet resolves the quadlet-mode start plan (the deployed/bed path): the plugin
@@ -131,7 +178,7 @@ func resolvePodRuntimeImage(ctx context.Context, ex *sdk.Executor, box, instance
 	if err := ensureImagePresent(ctx, ex, imageRef, rt.RunEngine); err != nil {
 		return nil, err
 	}
-	metaPtr, err := deploykit.ExtractMetadata("podman", imageRef)
+	metaPtr, err := deploykit.ExtractMetadata(rt.RunEngine, imageRef)
 	if err != nil {
 		return nil, err
 	}
@@ -156,11 +203,14 @@ func resolvePodRuntimeImage(ctx context.Context, ex *sdk.Executor, box, instance
 	return &podRuntimeImage{detected: detected, engine: engine, imageRef: imageRef, meta: &meta, dc: dc, volumes: volumes, bindMounts: bindMounts}, nil
 }
 
-// resolvePodStartDirect resolves the direct-mode (non-quadlet) start plan: the full `podman run -d`
-// argv the plugin execs. It returns RunArgv = buildStartArgs(…) instead of running it, and threads
-// the enc-ensure + tunnel legs. The sidecar-in-direct-mode rejection is preserved (sidecars require
-// quadlet).
+// resolvePodStartDirect resolves the direct-mode (non-unit) start plan: the launch argv the
+// plugin execs, built by the engine `start_plan` body. It returns RunArgv = buildStartArgs(…)
+// instead of running it, and threads the enc-ensure + tunnel legs. The sidecar-in-direct-mode
+// rejection is preserved (sidecars require a unit run mode).
 func resolvePodStartDirect(ctx context.Context, ex *sdk.Executor, box, instance string, rt *kit.ResolvedRuntime, opts spec.PodStartOpts) (*spec.PodLifecyclePlan, error) {
+	if rootfulUnsupported(rt) {
+		return nil, rootfulRefusal(rt.RunEngine, rt.RunMode)
+	}
 	img, err := resolvePodRuntimeImage(ctx, ex, box, instance, "", rt, opts.NoAutoDetect, opts.VolumeFlag, opts.Bind)
 	if err != nil {
 		return nil, err
@@ -240,7 +290,10 @@ func resolvePodStartDirect(ctx context.Context, ex *sdk.Executor, box, instance 
 
 	name := kit.ContainerNameInstance(box, instance)
 	workDir := deploykit.ResolveWorkingDir(volumes, bindMounts, home, box, instance)
-	argv := buildStartArgs(engine, imageRef, uid, gid, ports, name, volumes, bindMounts, detected.GPU, rt.BindAddress, envVars, security, entrypoint, workDir, resolvedNetwork)
+	argv, err := buildStartArgs(engine, podRootful(rt), imageRef, uid, gid, ports, name, volumes, bindMounts, detected.GPU, rt.BindAddress, envVars, security, entrypoint, workDir, resolvedNetwork)
+	if err != nil {
+		return nil, err
+	}
 
 	tunnel := resolvePodTunnelPlan(dc, box, instance)
 
@@ -272,7 +325,9 @@ func resolvePodStopPlan(ctx context.Context, ex *sdk.Executor, box, instance str
 		Unmount:       unmount,
 		Tunnel:        resolvePodTunnelPlan(dc, box, instance),
 	}
-	if quadletActive {
+	if rt.RunMode == "systemd-unit" {
+		plan.Mode = "systemd-unit"
+	} else if quadletActive {
 		plan.Mode = "quadlet"
 	} else {
 		plan.Mode = "direct"

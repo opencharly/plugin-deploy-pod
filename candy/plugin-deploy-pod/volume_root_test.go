@@ -138,16 +138,16 @@ func TestVolumeRootReconcileArgsIsShellSafe(t *testing.T) {
 
 // TestVolumeRootKeepIDCoversEveryEmitter is the drift guard. Three emitters can create the
 // container a deploy's named volumes are attached to — GenerateQuadlet (the quadlet path),
-// directPodmanArgs (`charly config` in direct mode, which execs podman whatever engine the runtime
-// resolved to) and buildStartArgs (`charly start` in direct mode, which respects the engine) — and
-// the reconcile must stand aside in EXACTLY the deployments where one of them emits keep-id: under
-// keep-id the volume's owner IS the runtime user, and the reconcile's standard-mapping helper could
-// only write an owner that runtime could not use.
+// directRunArgs (`charly config` in direct mode) and buildStartArgs (`charly start` in direct
+// mode) — and the reconcile must stand aside in EXACTLY the deployments where one of them emits
+// keep-id: under keep-id the volume's owner IS the runtime user, and the reconcile's
+// standard-mapping helper could only write an owner that runtime could not use.
 //
 // The assertion is equality against the emitters' own output, not against a retyped table, so a
-// condition that moves on either side fails here: the two argv builders call this package's
-// predicates directly, and the quadlet emitter lives in sdk (which cannot import this package) so
-// its mirror is compared against the renderer's real output. Nothing is left to drift.
+// condition that moves on either side fails here: the two argv builders call the capability
+// fact (engineKeepID) directly, and the quadlet emitter lives in sdk (which cannot import this
+// package) so its mirror is compared against the renderer's real output. Nothing is left to
+// drift.
 func TestVolumeRootKeepIDCoversEveryEmitter(t *testing.T) {
 	for _, tc := range []struct {
 		name, engine string
@@ -157,7 +157,7 @@ func TestVolumeRootKeepIDCoversEveryEmitter(t *testing.T) {
 		{"podman, runtime user, bind mounts", "podman", 1000, 1},
 		{"podman, container root, bind mounts", "podman", 0, 1},
 		{"docker, runtime user, bind mounts", "docker", 1000, 1},
-		{"nerdctl, runtime user, bind mounts", "nerdctl", 1000, 1},
+		{"containerd, runtime user, bind mounts", "containerd", 1000, 1},
 		{"docker, container root, bind mounts", "docker", 0, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -168,17 +168,26 @@ func TestVolumeRootKeepIDCoversEveryEmitter(t *testing.T) {
 			}
 
 			quadletEmits := strings.Contains(deploykit.GenerateQuadlet(qcfg), "UserNS=keep-id")
-			if got := volumeRootKeepID("quadlet", tc.engine, tc.uid, tc.binds); got != quadletEmits {
+			if got := volumeRootKeepID("quadlet", tc.engine, tc.binds); got != quadletEmits {
 				t.Errorf("quadlet mode: volumeRootKeepID = %v but GenerateQuadlet emits keep-id = %v", got, quadletEmits)
 			}
 
 			// Direct mode has TWO container creators, and either may be the one that runs.
-			directEmits := hasKeepID(directPodmanArgs(qcfg, binds))
-			startEmits := hasKeepID(buildStartArgs(tc.engine, "img", tc.uid, tc.uid, nil, "ctr", nil, binds,
-				false, "", nil, spec.SecurityConfig{}, nil, "/"))
-			if want := directEmits || startEmits; volumeRootKeepID("direct", tc.engine, tc.uid, tc.binds) != want {
-				t.Errorf("direct mode: volumeRootKeepID = %v but directPodmanArgs emits keep-id = %v and buildStartArgs = %v",
-					volumeRootKeepID("direct", tc.engine, tc.uid, tc.binds), directEmits, startEmits)
+			// Both now build through the engine start_plan body, so both consult engineKeepID.
+			directArgv, err := directRunArgs(qcfg, binds, tc.engine, false)
+			if err != nil {
+				t.Fatalf("directRunArgs(%s): %v", tc.engine, err)
+			}
+			directEmits := hasKeepID(directArgv)
+			startArgv, err := buildStartArgs(tc.engine, false, "img", tc.uid, tc.uid, nil, "ctr", nil, binds,
+				false, "", nil, spec.SecurityConfig{}, nil, "/")
+			if err != nil {
+				t.Fatalf("buildStartArgs(%s): %v", tc.engine, err)
+			}
+			startEmits := hasKeepID(startArgv)
+			if want := directEmits || startEmits; volumeRootKeepID("direct", tc.engine, tc.binds) != want {
+				t.Errorf("direct mode: volumeRootKeepID = %v but directRunArgs emits keep-id = %v and buildStartArgs = %v",
+					volumeRootKeepID("direct", tc.engine, tc.binds), directEmits, startEmits)
 			}
 
 			// buildShellArgs is the transient `charly run` twin of buildStartArgs and attaches the

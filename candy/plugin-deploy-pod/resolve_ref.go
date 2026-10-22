@@ -41,7 +41,7 @@ func resolveDeployRefLocal(ctx context.Context, ex *sdk.Executor, box, instance,
 		return "", "", err
 	}
 	deployBoxName = resolveDeployBoxNameLocal(ctx, ex, dc, box, instance)
-	if ov := resolvedOverlayImage(dc, box, instance); ov != "" && kit.LocalImageExists("podman", ov) {
+	if ov := resolvedOverlayImage(dc, box, instance); ov != "" && kit.LocalImageExists(currentRunEngine(), ov) {
 		return deployBoxName, ov, nil
 	}
 	return deployBoxName, kit.ResolveShellImageRef("", deployBoxName, tag), nil

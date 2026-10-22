@@ -37,9 +37,11 @@ func runPodConfigRemove(c *spec.PodConfigRemoveRequest) error {
 
 	if rt.RunMode == "direct" || IsDirectDeploy(boxName, c.Instance) {
 		name := kit.ContainerNameInstance(boxName, c.Instance)
-		_ = exec.Command("podman", "stop", name).Run()
-		if out, err := exec.Command("podman", "rm", "-f", name).CombinedOutput(); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: podman rm %s: %v\n%s", name, err, strings.TrimSpace(string(out)))
+		stop := engineStopArgv(rt.RunEngine, name)
+		_ = exec.Command(stop[0], stop[1:]...).Run()
+		rm := engineRemoveArgv(rt.RunEngine, name)
+		if out, err := exec.Command(rm[0], rm[1:]...).CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: %s rm -f %s: %v\n%s", rt.RunEngine, name, err, strings.TrimSpace(string(out)))
 		}
 		if err := removeDirectDeployMarker(boxName, c.Instance); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: removing direct-mode marker: %v\n", err)
@@ -48,8 +50,23 @@ func runPodConfigRemove(c *spec.PodConfigRemoveRequest) error {
 		return nil
 	}
 
+	if rt.RunMode == "systemd-unit" {
+		svc := kit.ServiceNameInstance(boxName, c.Instance)
+		cmd := exec.Command("systemctl", "--user", "disable", "--now", svc)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		_ = cmd.Run()
+		// Same contract as the quadlet branch below (and its doc comment above):
+		// `charly config remove` ONLY disables the service — the emitted unit file remains,
+		// so the deploy stays configured and can be started again. `charly remove` is the
+		// complete teardown that deletes the unit and reloads systemd
+		// (charly/CHANGELOG/2026.221.2032.md).
+		fmt.Fprintf(os.Stderr, "Disabled %s\n", svc)
+		return nil
+	}
+
 	if rt.RunMode != "quadlet" {
-		return fmt.Errorf("charly config remove requires run_mode=quadlet or direct (current: %s)", rt.RunMode)
+		return fmt.Errorf("charly config remove requires run_mode=quadlet, systemd-unit, or direct (current: %s)", rt.RunMode)
 	}
 
 	svc := kit.ServiceNameInstance(boxName, c.Instance)

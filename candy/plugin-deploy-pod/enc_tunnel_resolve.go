@@ -89,12 +89,17 @@ func resolvePodEncUnmountPlan(dc *deploykit.DeployConfig, box, instance string) 
 // resolvePodTunnel; dc is the SAME already-loaded config resolvePodEncEnsurePlan/UnmountPlan use
 // (no redundant load).
 func resolvePodTunnelPlan(dc *deploykit.DeployConfig, box, instance string) *spec.TunnelConfig {
+	rt, err := kit.ResolveRuntime()
+	if err != nil {
+		return nil
+	}
+	engine := rt.RunEngine
 	ctrName := kit.ContainerNameInstance(box, instance)
-	imageRef := kit.ContainerImage("podman", ctrName)
+	imageRef := kit.ContainerImage(engine, ctrName)
 	if imageRef == "" {
 		return nil
 	}
-	meta, err := deploykit.ExtractMetadata("podman", imageRef)
+	meta, err := deploykit.ExtractMetadata(engine, imageRef)
 	if err != nil || meta == nil {
 		return nil
 	}

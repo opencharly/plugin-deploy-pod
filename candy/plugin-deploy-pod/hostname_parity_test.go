@@ -1,7 +1,7 @@
 package deploypod
 
 // hostname_parity_test.go — the container-hostname parity across every deploy path.
-// directPodmanArgs already runs containers with --hostname <name>; the quadlet path
+// the direct-mode config launch already runs containers with --hostname <name>; the quadlet path
 // now emits Hostname=<name>; this test pins buildStartArgs (the direct-mode `charly
 // start` argv) to the same --hostname <name>, so the in-container hostname is always
 // the charly-network DNS name — load-bearing for in-container services that derive
@@ -16,8 +16,8 @@ import (
 )
 
 func TestBuildStartArgs_HostnameParity(t *testing.T) {
-	argv := buildStartArgs(
-		"podman",
+	argv, err := buildStartArgs(
+		"podman", false,
 		"ghcr.io/opencharly/demo:latest",
 		1000, 1000,
 		nil,                             // ports
@@ -31,6 +31,9 @@ func TestBuildStartArgs_HostnameParity(t *testing.T) {
 		"/home/user", // workingDir
 		"charly",     // network
 	)
+	if err != nil {
+		t.Fatalf("buildStartArgs: %v", err)
+	}
 	found := false
 	for i := 0; i < len(argv)-1; i++ {
 		if argv[i] == "--hostname" && argv[i+1] == "charly-demo" {
@@ -39,6 +42,6 @@ func TestBuildStartArgs_HostnameParity(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("buildStartArgs missing --hostname <name> parity with directPodmanArgs/quadlet: %v", argv)
+		t.Errorf("buildStartArgs missing --hostname <name> parity with the direct-config launch/quadlet: %v", argv)
 	}
 }
