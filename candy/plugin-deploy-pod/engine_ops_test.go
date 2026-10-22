@@ -246,9 +246,19 @@ func TestPodStartCommand_UnitRunModesUseSystemctl(t *testing.T) {
 	if cmd, _, _, err := podStartCommand(direct); err != nil || cmd != "'nerdctl' 'run' 'img'" {
 		t.Errorf("direct start: got %q, %v", cmd, err)
 	}
-	directDeploy := spec.PodLifecyclePlan{Mode: "quadlet", DirectDeploy: true, ContainerName: "charly-demo"}
-	if cmd, _, _, err := podStartCommand(directDeploy); err != nil || cmd != "podman start 'charly-demo'" {
-		t.Errorf("direct-deploy start: got %q, %v", cmd, err)
+	// A direct-deploy marker starts through the plan's RESOLVED engine binary, never a
+	// hard-coded podman (the #37 residue: a docker/containerd direct deploy was started with
+	// the wrong binary, or no working one at all).
+	for _, engine := range []string{"podman", "docker"} {
+		directDeploy := spec.PodLifecyclePlan{Mode: "quadlet", DirectDeploy: true, ContainerName: "charly-demo", EngineBin: engine}
+		want := engine + " start 'charly-demo'"
+		if cmd, _, _, err := podStartCommand(directDeploy); err != nil || cmd != want {
+			t.Errorf("direct-deploy start via %s: got %q, %v; want %q", engine, cmd, err, want)
+		}
+	}
+	// A plan with no resolved engine binary must fail loudly instead of exec'ing an empty argv[0].
+	if _, _, _, err := podStartCommand(spec.PodLifecyclePlan{Mode: "quadlet", DirectDeploy: true, ContainerName: "charly-demo"}); err == nil {
+		t.Error("direct-deploy start without EngineBin must be refused")
 	}
 	if _, _, _, err := podStartCommand(spec.PodLifecyclePlan{Mode: "bogus"}); err == nil {
 		t.Error("unknown run mode must be refused")
@@ -299,6 +309,64 @@ func TestEngineKeepID_ContainerdHasNoKeepIDArg(t *testing.T) {
 	}
 	if !engineKeepID("podman", 1) {
 		t.Error("podman's capability row declares keep-id; the podman control arm must keep it")
+	}
+}
+
+// countFlagValue returns how many times `flag value` appears as an adjacent pair in argv.
+func countFlagValue(argv []string, flag, value string) int {
+	n := 0
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == flag && argv[i+1] == value {
+			n++
+		}
+	}
+	return n
+}
+
+// TestEngineRunArgv_EnvEntriesVerbatim is the table-driven guard for the env shape: the engine
+// CLI accepts BOTH a bare `KEY` entry (inherit the variable from the launching process) and a
+// `KEY=VALUE` entry, and both must reach the argv byte-for-byte. #38: the former map
+// conversion kept only entries containing `=`, so `-e FOO` vanished silently and the
+// container started without the variable.
+func TestEngineRunArgv_EnvEntriesVerbatim(t *testing.T) {
+	cases := []struct {
+		name string
+		env  []string
+	}{
+		{"bare inherit", []string{"FOO"}},
+		{"pair", []string{"BAR=1"}},
+		{"empty value", []string{"EMPTY="}},
+		{"value contains equals", []string{"EQ=a=b"}},
+		{"all forms together", []string{"FOO", "BAR=1", "EMPTY=", "EQ=a=b"}},
+	}
+	for _, engine := range []string{"podman", "containerd"} {
+		for _, tc := range cases {
+			t.Run(engine+"/"+tc.name, func(t *testing.T) {
+				argv, _, err := engineRunArgv(engine, false, podEngineRun{
+					Image: "ghcr.io/opencharly/demo:latest",
+					Name:  "charly-demo",
+					Env:   tc.env,
+				})
+				if err != nil {
+					t.Fatalf("engineRunArgv(%s): %v", engine, err)
+				}
+				for _, entry := range tc.env {
+					if got := countFlagValue(argv, "-e", entry); got != 1 {
+						t.Errorf("env entry %q reached the engine %d times, want exactly 1: %q", entry, got, argv)
+					}
+				}
+				// No entry may be split, re-keyed or invented: one `-e` per input entry.
+				total := 0
+				for i := 0; i+1 < len(argv); i++ {
+					if argv[i] == "-e" {
+						total++
+					}
+				}
+				if total != len(tc.env) {
+					t.Errorf("got %d -e flags for %d env entries: %q", total, len(tc.env), argv)
+				}
+			})
+		}
 	}
 }
 

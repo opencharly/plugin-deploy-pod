@@ -26,8 +26,8 @@ func resolvePodAttachPlan(ctx context.Context, ex *sdk.Executor, box, instance s
 	return resolvePodCmdPlan(ctx, ex, box, instance, opts.Cmd, opts.CmdOpts)
 }
 
-// resolvePodShellPlan resolves `charly shell`: exec into the running container (`podman exec -it`)
-// when it is up, else an ephemeral `podman run --rm -it` of the image.
+// resolvePodShellPlan resolves `charly shell`: exec into the running container (`<engine> exec -it`)
+// when it is up, else an ephemeral `<engine> run --rm -it` of the image.
 func resolvePodShellPlan(ctx context.Context, ex *sdk.Executor, box, instance string, cmd []string, opts spec.PodShellOpts) (*spec.PodLiveStdioPlan, error) {
 	command := strings.Join(cmd, " ")
 
@@ -122,9 +122,7 @@ func resolvePodCmdPlan(ctx context.Context, ex *sdk.Executor, box, instance stri
 	}
 
 	argv := []string{engine, "exec", "-i"}
-	for _, e := range agentEnv {
-		argv = append(argv, "-e", e)
-	}
+	argv = append(argv, envArgs(agentEnv)...)
 	argv = append(argv, name, "sh", "-c", strings.Join(cmd, " "))
 	return &spec.PodLiveStdioPlan{Script: shellQuoteArgs(argv)}, nil
 }
@@ -223,9 +221,7 @@ func buildShellArgs(engine, imageRef string, uid, gid int, ports []string, volum
 	if engineKeepID(engine, len(bindMounts)) {
 		args = append(args, fmt.Sprintf("--userns=keep-id:uid=%d,gid=%d", uid, gid))
 	}
-	for _, e := range envVars {
-		args = append(args, "-e", e)
-	}
+	args = append(args, envArgs(envVars)...)
 	args = append(args, "--entrypoint", "bash", imageRef)
 	if command != "" {
 		args = append(args, "-c", command)
@@ -245,9 +241,7 @@ func buildExecArgs(engine, name string, uid, gid int, command string, envVars []
 		"--user", fmt.Sprintf("%d:%d", uid, gid),
 		"-w", workingDir,
 	}
-	for _, e := range envVars {
-		args = append(args, "-e", e)
-	}
+	args = append(args, envArgs(envVars)...)
 	args = append(args, name, "bash")
 	if command != "" {
 		args = append(args, "-c", command)

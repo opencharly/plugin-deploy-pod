@@ -81,8 +81,8 @@ func resolvePodStartSystemdUnit(ctx context.Context, ex *sdk.Executor, box, inst
 }
 
 // resolvePodStartQuadlet resolves the quadlet-mode start plan (the deployed/bed path): the plugin
-// runs `systemctl --user start <svc>` (or `podman start <ctr>` for a direct-deploy marker) + mounts
-// encrypted volumes.
+// runs `systemctl --user start <svc>` (or `<engine> start <ctr>` through the plan's resolved
+// engine binary for a direct-deploy marker) + mounts encrypted volumes.
 func resolvePodStartQuadlet(ctx context.Context, ex *sdk.Executor, box, instance string, rt *kit.ResolvedRuntime) (*spec.PodLifecyclePlan, error) {
 	exists, err := kit.QuadletExistsInstance(box, instance)
 	if err != nil {

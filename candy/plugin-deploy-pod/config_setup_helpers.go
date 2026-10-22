@@ -867,10 +867,7 @@ func runHook(engine, containerName, hookScript string, envVars []string) error {
 		return nil
 	}
 	args := []string{"exec"}
-	args = append(args, "-e", "CHARLY_CONTAINER_NAME="+containerName)
-	for _, env := range envVars {
-		args = append(args, "-e", env)
-	}
+	args = append(args, envArgs(append([]string{"CHARLY_CONTAINER_NAME=" + containerName}, envVars...))...)
 	args = append(args, containerName, "sh", "-c", hookScript)
 	cmd := exec.Command(engine, args...)
 	cmd.Stdout = os.Stderr
