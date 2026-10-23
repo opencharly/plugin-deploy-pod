@@ -93,7 +93,11 @@ func resolvePodTunnelPlan(dc *deploykit.DeployConfig, box, instance string) *spe
 	if err != nil {
 		return nil
 	}
-	engine := rt.RunEngine
+	sel, err := resolvePodSelectionFromConfig(dc, box, instance, rt)
+	if err != nil {
+		return nil
+	}
+	engine := string(sel.Engine)
 	ctrName := kit.ContainerNameInstance(box, instance)
 	imageRef := kit.ContainerImage(engine, ctrName)
 	if imageRef == "" {

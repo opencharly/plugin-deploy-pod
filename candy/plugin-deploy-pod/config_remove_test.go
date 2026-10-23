@@ -28,7 +28,9 @@ func TestRunPodConfigRemove_DirectModeAllowed(t *testing.T) {
 	_ = os.Setenv("CHARLY_RUN_MODE", "direct")
 	defer os.Unsetenv("CHARLY_RUN_MODE") //nolint:errcheck
 
-	err := runPodConfigRemove(&spec.PodConfigRemoveRequest{Box: "fedora-test"})
+	// A nil executor is the proof that no overlay read is required here: loadDeploy degrades
+	// to (nil, nil) with a warning, and the selection falls back to the runtime level.
+	err := runPodConfigRemove(t.Context(), nil, &spec.PodConfigRemoveRequest{Box: "fedora-test"})
 	// Direct-mode remove of a non-existent deploy is best-effort — podman rm prints a
 	// warning but returns nil. The pre-cutover "run_mode=quadlet required" hard error must NOT fire.
 	if err != nil && strings.Contains(err.Error(), "run_mode=quadlet") {

@@ -43,8 +43,18 @@ func resolvePodStartPlan(ctx context.Context, ex *sdk.Executor, box, instance st
 // .service (unit_emit) is started with `systemctl --user start <svc>`, exactly like the quadlet
 // path starts podman's generated unit. The unit file's existence is the "configured" signal.
 func resolvePodStartSystemdUnit(ctx context.Context, ex *sdk.Executor, box, instance string, rt *kit.ResolvedRuntime) (*spec.PodLifecyclePlan, error) {
-	if rootfulUnsupported(rt) {
-		return nil, rootfulRefusal(rt.RunEngine, rt.RunMode)
+	dc, err := loadDeploy(ctx, ex, "charly start")
+	if err != nil {
+		return nil, err
+	}
+	sel, err := resolvePodSelectionFromConfig(dc, box, instance, rt)
+	if err != nil {
+		return nil, err
+	}
+	// The rootful refusal stays FIRST (as it was): the operator gets the reason they cannot
+	// run this deployment, not a secondary "not configured".
+	if rootfulUnsupported(sel.Target, rt.RunMode) {
+		return nil, rootfulRefusal(sel.Engine, rt.RunMode)
 	}
 	svc := kit.ServiceNameInstance(box, instance)
 	svcDir, err := kit.SystemdUserDir()
@@ -57,19 +67,11 @@ func resolvePodStartSystemdUnit(ctx context.Context, ex *sdk.Executor, box, inst
 		}
 		return nil, err
 	}
-	engine, err := boxEngineForDeploy(ctx, ex, box, instance, rt.RunEngine)
-	if err != nil {
-		return nil, err
-	}
-	dc, err := loadDeploy(ctx, ex, "charly start")
-	if err != nil {
-		return nil, err
-	}
 	plan := &spec.PodLifecyclePlan{
 		Mode:          "systemd-unit",
 		SvcName:       svc,
 		ContainerName: kit.ContainerNameInstance(box, instance),
-		EngineBin:     kit.EngineBinary(engine),
+		EngineBin:     sel.binary(),
 	}
 	encJSON, err := resolvePodEncEnsurePlan(ctx, ex, dc, box, instance, false)
 	if err != nil {
@@ -92,11 +94,11 @@ func resolvePodStartQuadlet(ctx context.Context, ex *sdk.Executor, box, instance
 	if !exists && !directDeploy {
 		return nil, fmt.Errorf("not configured; run 'charly config %s' first", box)
 	}
-	engine, err := boxEngineForDeploy(ctx, ex, box, instance, rt.RunEngine)
+	dc, err := loadDeploy(ctx, ex, "charly start")
 	if err != nil {
 		return nil, err
 	}
-	dc, err := loadDeploy(ctx, ex, "charly start")
+	sel, err := resolvePodSelectionFromConfig(dc, box, instance, rt)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +107,7 @@ func resolvePodStartQuadlet(ctx context.Context, ex *sdk.Executor, box, instance
 		SvcName:       kit.ServiceNameInstance(box, instance),
 		ContainerName: kit.ContainerNameInstance(box, instance),
 		DirectDeploy:  directDeploy,
-		EngineBin:     kit.EngineBinary(engine),
+		EngineBin:     sel.binary(),
 	}
 	// Encrypted-volume mounts are skipped in direct-deploy mode (those require systemd-run --scope).
 	if !directDeploy {
@@ -119,30 +121,12 @@ func resolvePodStartQuadlet(ctx context.Context, ex *sdk.Executor, box, instance
 	return plan, nil
 }
 
-// boxEngineForDeploy reads the per-host deploy config's Engine override PLUGIN-SIDE via loadDeploy
-// (the cycle-free loaderkit read) — replicating deploykit.ResolveBoxEngineForDeploy's lookup WITHOUT
-// the DeployStateHost package-var dependency (a plugin calling the raw deploykit function would
-// silently no-op out-of-process — the placement-dependency hazard). #55 coneC-dsh — the
-// pod-config-box-engine host seam is DELETED.
-func boxEngineForDeploy(ctx context.Context, ex *sdk.Executor, box, instance, globalEngine string) (string, error) {
-	dc, err := loadDeploy(ctx, ex, "ResolveBoxEngineForDeploy")
-	if err != nil {
-		return globalEngine, err
-	}
-	if dc != nil {
-		if entry, ok := dc.Lookup(box, instance); ok && entry.Engine != "" {
-			return string(entry.Engine), nil
-		}
-	}
-	return globalEngine, nil
-}
-
 // podRuntimeImage is the resolved pod image context shared by the start-plan resolver and the F12
-// shell resolver (R3): the runtime-detected devices, the resolved engine + image ref + baked
-// metadata, the per-host deploy config, and the resolved volume backing.
+// shell resolver (R3): the runtime-detected devices, the RESOLVED selection (engine + target),
+// the image ref + baked metadata, the per-host deploy config, and the resolved volume backing.
 type podRuntimeImage struct {
 	detected   spec.DetectedDevices
-	engine     string
+	sel        podSelection
 	imageRef   string
 	meta       *spec.BoxMetadata
 	dc         *deploykit.DeployConfig
@@ -153,17 +137,29 @@ type podRuntimeImage struct {
 // resolvePodRuntimeImage resolves the pod's runtime image context — the identical HEAD both
 // resolvePodStartDirect (`charly start` direct-mode) and resolvePodShellPlan (`charly shell`)
 // compute: device detection + CDI, the deploy overlay, the image ref, and the volume backing.
+// It loads the overlay and resolves the selection once, then hands both to
+// resolvePodRuntimeImageWith.
 func resolvePodRuntimeImage(ctx context.Context, ex *sdk.Executor, box, instance, tag string, rt *kit.ResolvedRuntime, noAutoDetect bool, volumeFlag, bind []string) (*podRuntimeImage, error) {
-	// Device detection runs plugin-side (detect_devices.go — the relocated
-	// "pod-config-detect-devices" seam). The former seam passed Engine=rt.RunEngine, so the
-	// ensure-cdi leg fires for podman — preserved exactly.
-	detected := detectDevices(ctx, ex, noAutoDetect, rt.RunEngine)
-	engine := rt.RunEngine
-
 	dc, err := loadDeploy(ctx, ex, "charly pod runtime image")
 	if err != nil {
 		return nil, err
 	}
+	sel, err := resolvePodSelectionFromConfig(dc, box, instance, rt)
+	if err != nil {
+		return nil, err
+	}
+	return resolvePodRuntimeImageWith(ctx, ex, box, instance, tag, rt, dc, sel, noAutoDetect, volumeFlag, bind)
+}
+
+// resolvePodRuntimeImageWith resolves the image context against an already-loaded overlay and an
+// already-resolved selection, so a caller that must refuse a rootful target BEFORE any image
+// work does not pay a second overlay read.
+func resolvePodRuntimeImageWith(ctx context.Context, ex *sdk.Executor, box, instance, tag string, rt *kit.ResolvedRuntime, dc *deploykit.DeployConfig, sel podSelection, noAutoDetect bool, volumeFlag, bind []string) (*podRuntimeImage, error) {
+	// Device detection runs plugin-side (detect_devices.go — the relocated
+	// "pod-config-detect-devices" seam). It receives the RESOLVED engine, so the CDI ensure
+	// leg fires for the engine that will actually launch the container.
+	detected := detectDevices(ctx, ex, noAutoDetect, string(sel.Engine))
+
 	var deployVolumes []spec.DeployVolume
 	if dc != nil {
 		if overlay, ok := dc.Lookup(box, instance); ok {
@@ -175,10 +171,10 @@ func resolvePodRuntimeImage(ctx context.Context, ex *sdk.Executor, box, instance
 	if err != nil {
 		return nil, err
 	}
-	if err := ensureImagePresent(ctx, ex, imageRef, rt.RunEngine); err != nil {
+	if err := ensureImagePresent(ctx, ex, imageRef, sel.Target); err != nil {
 		return nil, err
 	}
-	metaPtr, err := deploykit.ExtractMetadata(rt.RunEngine, imageRef)
+	metaPtr, err := deploykit.ExtractMetadata(string(sel.Engine), imageRef)
 	if err != nil {
 		return nil, err
 	}
@@ -186,9 +182,6 @@ func resolvePodRuntimeImage(ctx context.Context, ex *sdk.Executor, box, instance
 		return nil, fmt.Errorf("image %s has no embedded metadata; rebuild with latest charly", imageRef)
 	}
 	meta := *metaPtr
-	if meta.Engine != "" {
-		engine = meta.Engine
-	}
 	if dc != nil {
 		deploykit.MergeDeployOntoMetadata(&meta, dc, box, instance)
 	}
@@ -200,7 +193,7 @@ func resolvePodRuntimeImage(ctx context.Context, ex *sdk.Executor, box, instance
 			imageRef = ref
 		}
 	}
-	return &podRuntimeImage{detected: detected, engine: engine, imageRef: imageRef, meta: &meta, dc: dc, volumes: volumes, bindMounts: bindMounts}, nil
+	return &podRuntimeImage{detected: detected, sel: sel, imageRef: imageRef, meta: &meta, dc: dc, volumes: volumes, bindMounts: bindMounts}, nil
 }
 
 // resolvePodStartDirect resolves the direct-mode (non-unit) start plan: the launch argv the
@@ -208,14 +201,22 @@ func resolvePodRuntimeImage(ctx context.Context, ex *sdk.Executor, box, instance
 // instead of running it, and threads the enc-ensure + tunnel legs. The sidecar-in-direct-mode
 // rejection is preserved (sidecars require a unit run mode).
 func resolvePodStartDirect(ctx context.Context, ex *sdk.Executor, box, instance string, rt *kit.ResolvedRuntime, opts spec.PodStartOpts) (*spec.PodLifecyclePlan, error) {
-	if rootfulUnsupported(rt) {
-		return nil, rootfulRefusal(rt.RunEngine, rt.RunMode)
-	}
-	img, err := resolvePodRuntimeImage(ctx, ex, box, instance, "", rt, opts.NoAutoDetect, opts.VolumeFlag, opts.Bind)
+	dc, err := loadDeploy(ctx, ex, "charly start")
 	if err != nil {
 		return nil, err
 	}
-	detected, engine, imageRef, meta, dc := img.detected, img.engine, img.imageRef, img.meta, img.dc
+	sel, err := resolvePodSelectionFromConfig(dc, box, instance, rt)
+	if err != nil {
+		return nil, err
+	}
+	if rootfulUnsupported(sel.Target, rt.RunMode) {
+		return nil, rootfulRefusal(sel.Engine, rt.RunMode)
+	}
+	img, err := resolvePodRuntimeImageWith(ctx, ex, box, instance, "", rt, dc, sel, opts.NoAutoDetect, opts.VolumeFlag, opts.Bind)
+	if err != nil {
+		return nil, err
+	}
+	detected, imageRef, meta := img.detected, img.imageRef, img.meta
 	volumes, bindMounts := img.volumes, img.bindMounts
 
 	if dc != nil {
@@ -258,7 +259,7 @@ func resolvePodStartDirect(ctx context.Context, ex *sdk.Executor, box, instance 
 	}
 	envVars = appendAutoDetectedEnv(envVars, detected)
 
-	resolvedNetwork, netErr := kit.ResolveNetwork(network, engine)
+	resolvedNetwork, netErr := kit.ResolveNetwork(network, string(sel.Engine))
 	if netErr != nil {
 		return nil, netErr
 	}
@@ -272,7 +273,7 @@ func resolvePodStartDirect(ctx context.Context, ex *sdk.Executor, box, instance 
 		// deleted "deploy-config-save-state" host seam.
 		deploySaveState(ctx, ex, box, instance, spec.SaveDeployStateInput{Ports: ports, SetPorts: true})
 	}
-	if conflicts := kit.CheckPortAvailability(ports, rt.BindAddress, engine); len(conflicts) > 0 {
+	if conflicts := kit.CheckPortAvailability(ports, rt.BindAddress, string(sel.Engine)); len(conflicts) > 0 {
 		return nil, fmt.Errorf("port conflicts detected:%s", kit.FormatPortConflicts(conflicts, box))
 	}
 
@@ -290,7 +291,7 @@ func resolvePodStartDirect(ctx context.Context, ex *sdk.Executor, box, instance 
 
 	name := kit.ContainerNameInstance(box, instance)
 	workDir := deploykit.ResolveWorkingDir(volumes, bindMounts, home, box, instance)
-	argv, err := buildStartArgs(engine, podRootful(rt), imageRef, uid, gid, ports, name, volumes, bindMounts, detected.GPU, rt.BindAddress, envVars, security, entrypoint, workDir, resolvedNetwork)
+	argv, err := buildStartArgs(sel, imageRef, uid, gid, ports, name, volumes, bindMounts, detected.GPU, rt.BindAddress, envVars, security, entrypoint, workDir, resolvedNetwork)
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +299,7 @@ func resolvePodStartDirect(ctx context.Context, ex *sdk.Executor, box, instance 
 	tunnel := resolvePodTunnelPlan(dc, box, instance)
 
 	return &spec.PodLifecyclePlan{
-		Mode: "direct", ContainerName: name, RunArgv: argv, EngineBin: kit.EngineBinary(engine),
+		Mode: "direct", ContainerName: name, RunArgv: argv, EngineBin: sel.binary(),
 		Enc: encJSON, Tunnel: tunnel,
 	}, nil
 }
@@ -310,18 +311,18 @@ func resolvePodStopPlan(ctx context.Context, ex *sdk.Executor, box, instance str
 		return nil, err
 	}
 	quadletActive, _ := kit.QuadletExistsInstance(box, instance)
-	engine, err := boxEngineForDeploy(ctx, ex, box, instance, rt.RunEngine)
+	dc, err := loadDeploy(ctx, ex, "charly stop")
 	if err != nil {
 		return nil, err
 	}
-	dc, err := loadDeploy(ctx, ex, "charly stop")
+	sel, err := resolvePodSelectionFromConfig(dc, box, instance, rt)
 	if err != nil {
 		return nil, err
 	}
 	plan := &spec.PodLifecyclePlan{
 		ContainerName: kit.ContainerNameInstance(box, instance),
 		SvcName:       kit.ServiceNameInstance(box, instance),
-		EngineBin:     kit.EngineBinary(engine),
+		EngineBin:     sel.binary(),
 		Unmount:       unmount,
 		Tunnel:        resolvePodTunnelPlan(dc, box, instance),
 	}

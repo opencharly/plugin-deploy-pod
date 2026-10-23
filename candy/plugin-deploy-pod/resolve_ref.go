@@ -41,8 +41,18 @@ func resolveDeployRefLocal(ctx context.Context, ex *sdk.Executor, box, instance,
 		return "", "", err
 	}
 	deployBoxName = resolveDeployBoxNameLocal(ctx, ex, dc, box, instance)
-	if ov := resolvedOverlayImage(dc, box, instance); ov != "" && kit.LocalImageExists(currentRunEngine(), ov) {
-		return deployBoxName, ov, nil
+	if ov := resolvedOverlayImage(dc, box, instance); ov != "" {
+		rt, rtErr := kit.ResolveRuntime()
+		if rtErr != nil {
+			return "", "", rtErr
+		}
+		sel, selErr := resolvePodSelectionFromConfig(dc, box, instance, rt)
+		if selErr != nil {
+			return "", "", selErr
+		}
+		if kit.LocalImageExists(string(sel.Engine), ov) {
+			return deployBoxName, ov, nil
+		}
 	}
 	return deployBoxName, kit.ResolveShellImageRef("", deployBoxName, tag), nil
 }

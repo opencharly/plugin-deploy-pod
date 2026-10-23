@@ -174,12 +174,13 @@ func TestVolumeRootKeepIDCoversEveryEmitter(t *testing.T) {
 
 			// Direct mode has TWO container creators, and either may be the one that runs.
 			// Both now build through the engine start_plan body, so both consult engineKeepID.
-			directArgv, err := directRunArgs(qcfg, binds, tc.engine, false)
+			sel := selectionForTest(t, deploykit.Selection{}, tc.engine)
+			directArgv, err := directRunArgs(qcfg, binds, sel)
 			if err != nil {
 				t.Fatalf("directRunArgs(%s): %v", tc.engine, err)
 			}
 			directEmits := hasKeepID(directArgv)
-			startArgv, err := buildStartArgs(tc.engine, false, "img", tc.uid, tc.uid, nil, "ctr", nil, binds,
+			startArgv, err := buildStartArgs(sel, "img", tc.uid, tc.uid, nil, "ctr", nil, binds,
 				false, "", nil, spec.SecurityConfig{}, nil, "/")
 			if err != nil {
 				t.Fatalf("buildStartArgs(%s): %v", tc.engine, err)
@@ -192,7 +193,7 @@ func TestVolumeRootKeepIDCoversEveryEmitter(t *testing.T) {
 
 			// buildShellArgs is the transient `charly run` twin of buildStartArgs and attaches the
 			// same named volumes; it carries the same condition, so it must agree with it.
-			shell := hasKeepID(buildShellArgs(tc.engine, "img", tc.uid, tc.uid, nil, nil, binds,
+			shell := hasKeepID(buildShellArgs(sel.Target, "img", tc.uid, tc.uid, nil, nil, binds,
 				false, "", "", nil, spec.SecurityConfig{}, "/", true))
 			if shell != startEmits {
 				t.Errorf("buildShellArgs emits keep-id = %v but buildStartArgs = %v", shell, startEmits)

@@ -487,17 +487,17 @@ func writeDirectDeployMarker(m directDeployMarker) error {
 // meant a direct-mode deploy ignored the resolved engine (containerd/docker still ran podman).
 // The engine is now a parameter, the argv comes from the engine class, and the caller executes
 // that argv.
-func directRunArgs(qcfg deploykit.QuadletConfig, bindMounts []deploykit.ResolvedBindMount, engine string, rootful bool) ([]string, error) {
+func directRunArgs(qcfg deploykit.QuadletConfig, bindMounts []deploykit.ResolvedBindMount, sel podSelection) ([]string, error) {
 	name := kit.ContainerNameInstance(qcfg.BoxName, qcfg.Instance)
 	network := qcfg.Network
 	if network == "" {
 		network = "charly"
 	}
-	argv, _, err := engineRunArgv(engine, rootful, podEngineRun{
+	argv, _, err := engineRunArgv(sel.Target, podEngineRun{
 		Image: qcfg.ImageRef, Name: name, Network: network,
 		Hostname: name, Restart: "always",
 		Detach: true,
-		KeepID: engineKeepID(engine, len(bindMounts)),
+		KeepID: engineKeepID(string(sel.Engine), len(bindMounts)),
 		UID:    qcfg.UID, GID: qcfg.GID,
 		Ports:      localizedPorts(qcfg.Ports, qcfg.BindAddress),
 		Volumes:    volumeArgs(qcfg.Volumes, bindMounts),
@@ -510,7 +510,7 @@ func directRunArgs(qcfg deploykit.QuadletConfig, bindMounts []deploykit.Resolved
 }
 
 // runConfigDirect mirrors the former BoxConfigSetupCmd.runConfigDirect, now engine-driven.
-func runConfigDirect(rt *kit.ResolvedRuntime, qcfg deploykit.QuadletConfig, bindMounts []deploykit.ResolvedBindMount, sidecars []deploykit.ResolvedSidecar, tunnelCfg *spec.TunnelConfig) error {
+func runConfigDirect(rt *kit.ResolvedRuntime, sel podSelection, qcfg deploykit.QuadletConfig, bindMounts []deploykit.ResolvedBindMount, sidecars []deploykit.ResolvedSidecar, tunnelCfg *spec.TunnelConfig) error {
 	if len(sidecars) > 0 {
 		fmt.Fprintf(os.Stderr, "Warning: sidecars are not supported in direct mode (skipping); use run_mode=quadlet for sidecar deploys.\n")
 	}
@@ -520,16 +520,16 @@ func runConfigDirect(rt *kit.ResolvedRuntime, qcfg deploykit.QuadletConfig, bind
 	if deploykit.HasEncryptedBindMounts(bindMounts) {
 		fmt.Fprintf(os.Stderr, "Warning: encrypted bind mounts require systemd-run; encrypted volumes will not be initialized in direct mode.\n")
 	}
-	if rootfulUnsupported(rt) {
-		return rootfulRefusal(rt.RunEngine, rt.RunMode)
+	if rootfulUnsupported(sel.Target, rt.RunMode) {
+		return rootfulRefusal(sel.Engine, rt.RunMode)
 	}
-	engine := rt.RunEngine
+	engine := string(sel.Engine)
 	name := kit.ContainerNameInstance(qcfg.BoxName, qcfg.Instance)
-	stop := engineStopArgv(engine, name)
+	stop := engineStopArgv(sel.Target, name)
 	_ = exec.Command(stop[0], stop[1:]...).Run()
-	rm := engineRemoveArgv(engine, name)
+	rm := engineRemoveArgv(sel.Target, name)
 	_ = exec.Command(rm[0], rm[1:]...).Run()
-	args, err := directRunArgs(qcfg, bindMounts, engine, podRootful(rt))
+	args, err := directRunArgs(qcfg, bindMounts, sel)
 	if err != nil {
 		return err
 	}
@@ -583,12 +583,11 @@ func podConfigWriteSelf(r spec.PodConfigWriteRequest) (spec.PodConfigWriteReply,
 func provisionData(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, c *spec.PodConfigSetupRequest, meta *spec.BoxMetadata, imageRef string, dc *deploykit.DeployConfig, bindMounts []deploykit.ResolvedBindMount, volumes []deploykit.VolumeMount, deployVolumes []spec.DeployVolume) error {
 	dataMeta := meta
 	dataRef := imageRef
-	dataEngine := rt.RunEngine
-	if dc != nil {
-		if entry, ok := dc.Lookup(c.Box, c.Instance); ok && entry.Engine != "" {
-			dataEngine = string(entry.Engine)
-		}
+	sel, err := resolvePodSelectionFromConfig(dc, c.Box, c.Instance, rt)
+	if err != nil {
+		return err
 	}
+	dataEngine := string(sel.Engine)
 
 	if c.DataFrom != "" {
 		dataRef = c.DataFrom
@@ -597,7 +596,7 @@ func provisionData(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntim
 				dataRef = resolved
 			}
 		}
-		if err := ensureImagePresent(ctx, ex, dataRef, rt.RunEngine); err != nil {
+		if err := ensureImagePresent(ctx, ex, dataRef, sel.Target); err != nil {
 			return fmt.Errorf("extracting metadata from data image %s: %w", dataRef, err)
 		}
 		dm, err := deploykit.ExtractMetadata(dataEngine, dataRef)
@@ -701,11 +700,18 @@ func updateAllDeployedQuadlets(ctx context.Context, ex *sdk.Executor, rt *kit.Re
 				imageRef = ref
 			}
 		}
-		if err := ensureImagePresent(ctx, ex, imageRef, rt.RunEngine); err != nil {
+		// Every entry resolves its OWN selection: a per-deploy `engine:`/`namespace:` in
+		// the overlay must reach that entry's quadlet, not the runtime's global engine.
+		updateSel, selErr := resolvePodSelectionFromConfig(dc, boxName, instance, rt)
+		if selErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not resolve the engine for %s, skipping quadlet update: %v\n", key, selErr)
+			continue
+		}
+		if err := ensureImagePresent(ctx, ex, imageRef, updateSel.Target); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not read metadata for %s, skipping quadlet update\n", key)
 			continue
 		}
-		metaPtr, err := deploykit.ExtractMetadata(rt.RunEngine, imageRef)
+		metaPtr, err := deploykit.ExtractMetadata(string(updateSel.Engine), imageRef)
 		if err != nil || metaPtr == nil {
 			continue
 		}
@@ -721,7 +727,7 @@ func updateAllDeployedQuadlets(ctx context.Context, ex *sdk.Executor, rt *kit.Re
 			continue
 		}
 		envVars = kit.EnrichNoProxy(envVars, deploykit.DeployedContainerNames(dc))
-		resolvedNetwork, _ := kit.ResolveNetwork(meta.Network, rt.RunEngine)
+		resolvedNetwork, _ := kit.ResolveNetwork(meta.Network, string(updateSel.Engine))
 
 		// Device detection runs plugin-side (detect_devices.go). The former seam call passed an
 		// empty request (NoAutoDetect=false, Engine="") and SWALLOWED the error — the
@@ -759,7 +765,7 @@ func updateAllDeployedQuadlets(ctx context.Context, ex *sdk.Executor, rt *kit.Re
 		}
 		envVars = appendAutoDetectedEnv(envVars, detected)
 
-		provisioned, _, provResolutions, isKeyring, perr := resolvePodProvisionSecrets(ctx, ex, &meta, boxName, instance, rt.RunEngine, true, nil)
+		provisioned, _, provResolutions, isKeyring, perr := resolvePodProvisionSecrets(ctx, ex, &meta, boxName, instance, string(updateSel.Engine), true, nil)
 		if perr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: provisioning secrets for %s: %v\n", key, perr)
 			continue
@@ -786,7 +792,7 @@ func updateAllDeployedQuadlets(ctx context.Context, ex *sdk.Executor, rt *kit.Re
 		var resolvedSidecars []deploykit.ResolvedSidecar
 		podName := ""
 		if len(deploySidecarsRaw) > 0 {
-			scRes, err := resolvePodSidecars(ctx, ex, deploySidecarsRaw, deploykit.SidecarTemplatesOf(dc), nil, boxName, instance, rt.RunEngine, true, nil)
+			scRes, err := resolvePodSidecars(ctx, ex, deploySidecarsRaw, deploykit.SidecarTemplatesOf(dc), nil, boxName, instance, string(updateSel.Engine), true, nil)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: resolving sidecars for %s: %v\n", key, err)
 				continue
@@ -1029,16 +1035,16 @@ func mergeVolumeConfigsLocal(base, overrides []spec.DeployVolume) []spec.DeployV
 // through the engine `start_plan` body (engine_ops.go): the engine word selects the binary, the
 // keep-id fact, the GPU flag style and the runtime handler, so a containerd/docker deploy no
 // longer runs a podman argv. rootful selects the engine's mode-specific workload-user fact.
-func buildStartArgs(engine string, rootful bool, imageRef string, uid, gid int, ports []string, name string, volumes []deploykit.VolumeMount, bindMounts []deploykit.ResolvedBindMount, gpu bool, bindAddr string, envVars []string, security spec.SecurityConfig, entrypoint []string, workingDir string, network ...string) ([]string, error) {
+func buildStartArgs(sel podSelection, imageRef string, uid, gid int, ports []string, name string, volumes []deploykit.VolumeMount, bindMounts []deploykit.ResolvedBindMount, gpu bool, bindAddr string, envVars []string, security spec.SecurityConfig, entrypoint []string, workingDir string, network ...string) ([]string, error) {
 	net := ""
 	if len(network) > 0 {
 		net = network[0]
 	}
-	argv, _, err := engineRunArgv(engine, rootful, podEngineRun{
+	argv, _, err := engineRunArgv(sel.Target, podEngineRun{
 		Image: imageRef, Name: name, Network: net,
 		WorkingDir: workingDir, Hostname: name,
 		Detach: true, Remove: true,
-		KeepID: engineKeepID(engine, len(bindMounts)),
+		KeepID: engineKeepID(string(sel.Engine), len(bindMounts)),
 		UID:    uid, GID: gid,
 		Ports:      localizedPorts(ports, bindAddr),
 		Volumes:    volumeArgs(volumes, bindMounts),

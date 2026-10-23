@@ -6,8 +6,7 @@ import (
 	"fmt"
 
 	"github.com/opencharly/sdk"
-	"github.com/opencharly/sdk/kit"
-	"github.com/opencharly/spec/container"
+	"github.com/opencharly/sdk/deploykit"
 	"github.com/opencharly/spec/spec"
 )
 
@@ -16,51 +15,109 @@ import (
 // (K-wave W3a B6, the A2-proven peer-dispatch pattern: candy/plugin-preempt already reaches a
 // COMPILED-IN provider word via a plain resolve+invoke; here the plugin reaches build:ensure the
 // SAME way core's own dispatchBuildEnsure does, just via the plugin-to-plugin
-// Executor.InvokeProvider leg instead of core's private providerRegistry). container.LocalImageExists
-// / container.TransferImage are ALREADY portable (spec/container, used directly by candy/plugin-build
-// per that package's own doc comment) — no seam needed for those tiers either. The
-// "pod-config-ensure-image" HostBuild seam + its core handler are DELETED; dispatchBuildEnsure
-// itself STAYS core (it has other core-internal callers: plugin_executor_reverse.go — the former
-// check-run preflight caller is gone too, K-wave 2 cone R4: the check preflight now reaches
-// build:ensure over the SAME InvokeProvider peer dispatch this file uses).
+// Executor.InvokeProvider leg instead of core's private providerRegistry).
 //
-// THE ENGINE IS THE RESOLVED RUN ENGINE. It used to be a package constant naming podman, which
-// made every pod stage its image into podman's store no matter what `engine.run` said, and then
-// transfer it across stores. The pod now stages into the store of the engine it will actually
-// launch on; `build:ensure` receives that same engine word.
+// THE STORE IS THE W3.7 ONE. The presence probe is deploykit's engine-neutral ImageStore, built
+// from the RESOLVED target (selection.go) — not container.LocalImageExists over an engine word.
+// The store addresses the engine CLI through the capability row (binary, presence argv, daemon
+// address, namespace), so a containerd deploy probes the resolved namespace instead of assuming
+// the capability default, and a daemon failure is surfaced rather than folded into "absent".
+//
+// The staging step stays build:ensure (W3.6), which receives the SAME resolved engine and lands
+// the image in the store this file just probed. The sdk's ImageResolver.Build hook expresses
+// that step for a caller that owns a CharlyImageSource (the engine-neutral built-image store);
+// no production implementation of that source exists at this pin (opencharly/sdk#460), so the
+// documented W3.7 order — target store, then build:ensure — is driven here instead of through
+// the Build hook.
 
-// ensureImagePresent guarantees imageRef is available in the resolved run engine's local store,
-// driving the store itself (no host round-trip): (1) already-present short-circuit, (2)
-// build:ensure peer-dispatch (pulls from the registry, falling back to a local build for a
-// project charly.yml entry).
-func ensureImagePresent(ctx context.Context, ex *sdk.Executor, imageRef, runEngine string) error {
-	engine := resolveRunEngine(runEngine)
-	if container.LocalImageExists(engine, imageRef) {
-		return nil
-	}
-	if err := dispatchBuildEnsurePeer(ctx, ex, imageRef, engine); err == nil {
-		return nil
-	}
-	return fmt.Errorf("%w: %s", spec.ErrImageNotLocal, imageRef)
+// reverseDeployExecutor adapts the plugin-side executor handle to the spec.DeployExecutor
+// surface deploykit.NewImageStore addresses. The image store calls RunCapture (and nothing
+// else), so every other method fails loudly instead of inventing a local answer.
+type reverseDeployExecutor struct{ ex *sdk.Executor }
+
+func (e reverseDeployExecutor) Venue() string { return "plugin-reverse-channel" }
+func (e reverseDeployExecutor) Kind() string  { return "plugin-reverse-channel" }
+
+func (e reverseDeployExecutor) RunCapture(ctx context.Context, script string) (string, string, int, error) {
+	return e.ex.RunCapture(ctx, script)
 }
 
-// resolveRunEngine is the ONE fallback for an unset engine word: the schema's default engine.
-// The runtime resolver always yields a concrete word; this guards direct callers and tests
-// without inventing a literal.
-func resolveRunEngine(runEngine string) string {
-	if runEngine == "" {
-		return spec.DefaultContainerEngine
-	}
-	return runEngine
+func (e reverseDeployExecutor) RunSystem(context.Context, string, spec.EmitOpts) error {
+	return spec.ErrNotSupported
 }
 
-// currentRunEngine resolves the configured run engine for call sites that do not already carry
-// a ResolvedRuntime. A resolution failure degrades to the schema default, never to a literal.
-func currentRunEngine() string {
-	if rt, err := kit.ResolveRuntime(); err == nil {
-		return resolveRunEngine(rt.RunEngine)
+func (e reverseDeployExecutor) RunUser(context.Context, string, spec.EmitOpts) error {
+	return spec.ErrNotSupported
+}
+
+func (e reverseDeployExecutor) RunBuilder(context.Context, spec.BuilderRunOpts) ([]byte, error) {
+	return nil, spec.ErrNotSupported
+}
+
+func (e reverseDeployExecutor) PutFile(context.Context, string, string, uint32, bool, spec.EmitOpts) error {
+	return spec.ErrNotSupported
+}
+
+func (e reverseDeployExecutor) GetFile(context.Context, string, bool, spec.EmitOpts) ([]byte, error) {
+	return nil, spec.ErrNotSupported
+}
+
+func (e reverseDeployExecutor) RunInteractive(context.Context, string) (int, error) {
+	return 0, spec.ErrNotSupported
+}
+
+func (e reverseDeployExecutor) RunStream(context.Context, string) (int, error) {
+	return 0, spec.ErrNotSupported
+}
+
+func (e reverseDeployExecutor) ResolveHome(context.Context, string) (string, error) {
+	return "", spec.ErrNotSupported
+}
+
+// newImageStore builds the W3.7 store for an already-resolved target.
+func newImageStore(ex *sdk.Executor, target deploykit.ContainerdTarget) (deploykit.ImageStore, error) {
+	if ex == nil {
+		return nil, fmt.Errorf("image store: no executor")
 	}
-	return resolveRunEngine("")
+	return deploykit.NewImageStore(reverseDeployExecutor{ex: ex}, target)
+}
+
+// ensureImagePresent guarantees imageRef is available in the RESOLVED target store, driving the
+// store itself (no host round-trip): (1) the target store already addresses it, (2) otherwise
+// build:ensure (W3.6) stages it — pulling from the registry or building locally — and the store
+// is re-probed to prove the boundary.
+func ensureImagePresent(ctx context.Context, ex *sdk.Executor, imageRef string, target deploykit.ContainerdTarget) error {
+	store, err := newImageStore(ex, target)
+	if err != nil {
+		return err
+	}
+	// W3.7's resolution order starts at the target store. ResolveImage answers the
+	// "absent" case, but it folds a probe FAILURE into the same error, so re-probe on the
+	// error path to keep a daemon fault distinct from a confirmed miss.
+	resolver := &deploykit.ImageResolver{}
+	if _, err := resolver.ResolveImage(ctx, imageRef, store); err == nil {
+		return nil
+	}
+	present, err := store.Has(ctx, imageRef)
+	if err != nil {
+		return err
+	}
+	if present {
+		return nil
+	}
+	// Step 4 — build:ensure. It receives the SAME resolved engine word, so the image lands in
+	// the store just probed.
+	if err := dispatchBuildEnsurePeer(ctx, ex, imageRef, string(target.Engine)); err != nil {
+		return fmt.Errorf("%w: %s: %v", spec.ErrImageNotLocal, imageRef, err)
+	}
+	present, err = store.Has(ctx, imageRef)
+	if err != nil {
+		return err
+	}
+	if !present {
+		return fmt.Errorf("%w: %s (build:ensure did not stage it into the %s store)", spec.ErrImageNotLocal, imageRef, target.Engine)
+	}
+	return nil
 }
 
 // dispatchBuildEnsurePeer InvokeProviders the compiled-in build:ensure word — the SAME word

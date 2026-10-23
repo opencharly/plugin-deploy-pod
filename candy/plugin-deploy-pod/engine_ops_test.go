@@ -37,7 +37,7 @@ func hasFlag(argv []string, flag string) bool {
 }
 
 func TestEngineRunArgv_ContainerdUnitPlan(t *testing.T) {
-	argv, mode, err := engineRunArgv("containerd", false, podEngineRun{
+	argv, mode, err := engineRunArgv(selectionForTest(t, deploykit.Selection{}, "containerd").Target, podEngineRun{
 		Image:      "ghcr.io/opencharly/demo:latest",
 		Name:       "charly-demo",
 		Network:    "charly",
@@ -80,7 +80,7 @@ func TestEngineRunArgv_ContainerdUnitPlan(t *testing.T) {
 }
 
 func TestEngineRunArgv_PodmanPlanUnchanged(t *testing.T) {
-	argv, mode, err := engineRunArgv("podman", false, podEngineRun{
+	argv, mode, err := engineRunArgv(selectionForTest(t, deploykit.Selection{}, "podman").Target, podEngineRun{
 		Image:      "ghcr.io/opencharly/demo:latest",
 		Name:       "charly-demo",
 		Network:    "charly",
@@ -132,7 +132,8 @@ func TestEngineRunArgv_PodmanPlanUnchanged(t *testing.T) {
 }
 
 func TestEngineUnitFiles_ContainerdUnitWrapsStartPlan(t *testing.T) {
-	argv, _, err := engineRunArgv("containerd", false, podEngineRun{
+	sel := selectionForTest(t, deploykit.Selection{}, "containerd")
+	argv, _, err := engineRunArgv(sel.Target, podEngineRun{
 		Image: "ghcr.io/opencharly/demo:latest", Name: "charly-demo",
 	})
 	if err != nil {
@@ -140,7 +141,7 @@ func TestEngineUnitFiles_ContainerdUnitWrapsStartPlan(t *testing.T) {
 	}
 	files, err := engineUnitFiles("containerd", spec.EngineUnitRequest{
 		Name: "demo", RunMode: "systemd-unit", StartArgv: argv,
-		StopArgv: engineStopArgv("containerd", "charly-demo"),
+		StopArgv: engineStopArgv(sel.Target, "charly-demo"),
 	})
 	if err != nil {
 		t.Fatalf("engineUnitFiles(containerd): %v", err)
@@ -158,8 +159,8 @@ func TestEngineUnitFiles_ContainerdUnitWrapsStartPlan(t *testing.T) {
 }
 
 func TestRootfulContainerdRefused(t *testing.T) {
-	rt := kitResolvedRuntimeForTest("containerd", "systemd-unit", "sudo")
-	if !rootfulUnsupported(rt) {
+	containerd := selectionForTest(t, deploykit.Selection{Rootful: "sudo"}, "containerd")
+	if !rootfulUnsupported(containerd.Target, "systemd-unit") {
 		t.Fatal("a rootful containerd systemd-unit target must be refused, not silently run rootless")
 	}
 	if err := rootfulRefusal("containerd", "systemd-unit"); err == nil ||
@@ -168,8 +169,8 @@ func TestRootfulContainerdRefused(t *testing.T) {
 	}
 	// The podman quadlet control: its rootful mode is not a refusal (the capability declares no
 	// privilege prefix and no system-scope unit need here), so the podman plan stays unchanged.
-	podman := kitResolvedRuntimeForTest("podman", "quadlet", "sudo")
-	if rootfulUnsupported(podman) {
+	podman := selectionForTest(t, deploykit.Selection{Rootful: "sudo"}, "podman")
+	if rootfulUnsupported(podman.Target, "quadlet") {
 		t.Error("podman quadlet rootful must keep its existing behaviour")
 	}
 }
@@ -189,7 +190,7 @@ func TestWriteSystemdUnitConfig_Containerd(t *testing.T) {
 	rt := kitResolvedRuntimeForTest("containerd", "systemd-unit", "auto")
 	qcfg := deploykit.QuadletConfig{BoxName: "demo", ImageRef: "img", Home: "/home/user"}
 
-	written, err := writeSystemdUnitConfig(rt, qcfg, nil, nil, nil)
+	written, err := writeSystemdUnitConfig(rt, selectionForTest(t, deploykit.Selection{}, "containerd"), qcfg, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("writeSystemdUnitConfig: %v", err)
 	}
@@ -213,7 +214,7 @@ func TestWriteSystemdUnitConfig_Containerd(t *testing.T) {
 
 	// A rootful systemd-unit target is refused before any file is written.
 	rootful := kitResolvedRuntimeForTest("containerd", "systemd-unit", "sudo")
-	if _, err := writeSystemdUnitConfig(rootful, qcfg, nil, nil, nil); err == nil || !strings.Contains(err.Error(), "rootless") {
+	if _, err := writeSystemdUnitConfig(rootful, selectionForTest(t, deploykit.Selection{Rootful: "sudo"}, "containerd"), qcfg, nil, nil, nil); err == nil || !strings.Contains(err.Error(), "rootless") {
 		t.Errorf("rootful systemd-unit must be refused with the remedy, got %v", err)
 	}
 }
@@ -342,7 +343,7 @@ func TestEngineRunArgv_EnvEntriesVerbatim(t *testing.T) {
 	for _, engine := range []string{"podman", "containerd"} {
 		for _, tc := range cases {
 			t.Run(engine+"/"+tc.name, func(t *testing.T) {
-				argv, _, err := engineRunArgv(engine, false, podEngineRun{
+				argv, _, err := engineRunArgv(selectionForTest(t, deploykit.Selection{}, engine).Target, podEngineRun{
 					Image: "ghcr.io/opencharly/demo:latest",
 					Name:  "charly-demo",
 					Env:   tc.env,
@@ -375,7 +376,7 @@ func TestEngineRunArgv_EnvEntriesVerbatim(t *testing.T) {
 func TestWriteSystemdUnitConfig_RejectsBareEnv(t *testing.T) {
 	rt := kitResolvedRuntimeForTest("containerd", "systemd-unit", "auto")
 	qcfg := deploykit.QuadletConfig{BoxName: "demo", ImageRef: "img", Env: []string{"FOO"}}
-	if _, err := writeSystemdUnitConfig(rt, qcfg, nil, nil, nil); err == nil || !strings.Contains(err.Error(), "inherit host environment variable") {
+	if _, err := writeSystemdUnitConfig(rt, selectionForTest(t, deploykit.Selection{}, "containerd"), qcfg, nil, nil, nil); err == nil || !strings.Contains(err.Error(), "inherit host environment variable") {
 		t.Errorf("bare env entry must be refused, got %v", err)
 	}
 }
