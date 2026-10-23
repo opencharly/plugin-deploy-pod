@@ -63,3 +63,25 @@ plugin-deploy-pod:
               context:
                 - build
               command: "true"
+
+# ---------------------------------------------------------------------------
+# The verb/schema skills this repo's own candy owns — routing only.
+#
+# Each node carries `name`/`family`/`owner` (plus `triggers:` where the skill
+# generates DISPATCHER.md rows). The prose is the skill FILE at
+# `<repo root>/.agents/skills/<name>/SKILL.md`, never an inline `description:`
+# or `content:` — an inline body that disagrees with its file is a hard error
+# in the marketplace generator. `family:` is the marketplace family the skill
+# was authored under, kept so every existing `/charly-<family>:<name>` address
+# still resolves; `owner:` names the candy whose command/kind surface the
+# skill documents. This candy composes no image, so these nodes add nothing to
+# any `ai.opencharly.skill` OCI label; the bodies reach consumers through the
+# generated marketplace corpus.
+# ---------------------------------------------------------------------------
+sidecar-skill:
+  skill:
+    name: sidecar
+    family: automation
+    owner: plugin-deploy-pod
+    triggers:
+      - "sidecars via `charly config` / Tailscale exit nodes / `env_accept` / `env_require` / pod networking"

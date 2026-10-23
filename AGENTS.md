@@ -26,10 +26,13 @@ Canonical files:
 
 ## Load these skills first (R0)
 
-- `/charly-pod:pod` — the `kind: pod` / deploy entity schema reference. Load
-  before changing the substrate or the deploy entity shape. This candy carries
-  no `skill:` entity of its own; the gap is tracked in
-  [opencharly/opencharly#291](https://github.com/opencharly/opencharly/issues/291).
+- `/charly-automation:sidecar` — the sidecar model (`sidecar_resolve.go`,
+  the embedded template library, `charly config --sidecar`). OWNED HERE: the
+  candy carries its `skill:` entity and the prose in
+  `.agents/skills/sidecar/SKILL.md`.
+- `/charly-pod:pod` — the `kind: pod` / deploy entity schema reference (its source
+  of truth is `schema/pod.cue` in the `spec` module). Load before changing the
+  substrate or the deploy entity shape.
 - `/charly-core:deploy` — `charly deploy add`/`del`, quadlet generation, volume
   backing, tunnels, and per-machine deploy overlays.
 - `/charly-internals:plugin` — the plugin authoring reference: the `plugin:`
