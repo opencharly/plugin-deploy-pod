@@ -331,11 +331,14 @@ func podPrepareVenue(ctx context.Context, exec *sdk.Executor, p lifecycleParams)
 	var baseRegistry string
 	if reply.BaseImage != "" {
 		if rt, rterr := kit.ResolveRuntime(); rterr == nil {
-			if baseMeta, merr := deploykit.ExtractMetadata(rt.RunEngine, reply.BaseImage); merr == nil && baseMeta != nil {
-				baseUser = baseMeta.User
-				sec := baseMeta.Security
-				baseSecurity = &sec
-				baseRegistry = baseMeta.Registry
+			sel, selErr := resolvePodSelectionFor(ctx, exec, baseName, "", rt)
+			if selErr == nil {
+				if baseMeta, merr := deploykit.ExtractMetadata(string(sel.Engine), reply.BaseImage); merr == nil && baseMeta != nil {
+					baseUser = baseMeta.User
+					sec := baseMeta.Security
+					baseSecurity = &sec
+					baseRegistry = baseMeta.Registry
+				}
 			}
 		}
 	}

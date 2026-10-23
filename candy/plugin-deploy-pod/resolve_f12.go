@@ -39,7 +39,7 @@ func resolvePodShellPlan(ctx context.Context, ex *sdk.Executor, box, instance st
 	if err != nil {
 		return nil, err
 	}
-	detected, engine, imageRef, meta, dc := img.detected, img.engine, img.imageRef, img.meta, img.dc
+	detected, sel, imageRef, meta, dc := img.detected, img.sel, img.imageRef, img.meta, img.dc
 	volumes, bindMounts := img.volumes, img.bindMounts
 
 	uid, gid, home := meta.UID, meta.GID, meta.Home
@@ -65,10 +65,10 @@ func resolvePodShellPlan(ctx context.Context, ex *sdk.Executor, box, instance st
 	agentFwd := kit.ResolveAgentForwarding(rt, deployBox, home)
 
 	name := kit.ContainerNameInstance(box, instance)
-	if containerRunningLocal(engine, name) {
+	if containerRunningLocal(sel.Target, name) {
 		execEnv := append(append([]string{}, envVars...), agentFwd.Env...)
 		workDir := deploykit.ResolveWorkingDir(volumes, bindMounts, home, box, instance)
-		argv := buildExecArgs(engine, name, uid, gid, command, execEnv, workDir, opts.Interactive)
+		argv := buildExecArgs(sel.Target, name, uid, gid, command, execEnv, workDir, opts.Interactive)
 		return &spec.PodLiveStdioPlan{Script: hostAttachScript(argv, opts.WrapPTY)}, nil
 	}
 
@@ -86,24 +86,25 @@ func resolvePodShellPlan(ctx context.Context, ex *sdk.Executor, box, instance st
 		security.Mounts = deploykit.AppendUnique(security.Mounts, v)
 	}
 	envVars = append(envVars, agentFwd.Env...)
-	resolvedNetwork, err := kit.ResolveNetwork(network, engine)
+	resolvedNetwork, err := kit.ResolveNetwork(network, string(sel.Engine))
 	if err != nil {
 		return nil, err
 	}
 	workDir := deploykit.ResolveWorkingDir(volumes, bindMounts, home, box, instance)
-	argv := buildShellArgs(engine, imageRef, uid, gid, ports, volumes, bindMounts, detected.GPU, command, rt.BindAddress, envVars, security, workDir, opts.Interactive, resolvedNetwork)
+	argv := buildShellArgs(sel.Target, imageRef, uid, gid, ports, volumes, bindMounts, detected.GPU, command, rt.BindAddress, envVars, security, workDir, opts.Interactive, resolvedNetwork)
 	return &spec.PodLiveStdioPlan{Script: hostAttachScript(argv, opts.WrapPTY)}, nil
 }
 
 // resolvePodCmdPlan resolves `charly cmd`: an `<engine> exec -i [-e agentEnv] <ctr> sh -c <command>`
 // into the RUNNING container (or a named sidecar), with agent-forwarding env resolved.
 func resolvePodCmdPlan(ctx context.Context, ex *sdk.Executor, box, instance string, cmd []string, opts spec.PodCmdOpts) (*spec.PodLiveStdioPlan, error) {
-	var engine, name string
+	var sel podSelection
+	var name string
 	var err error
 	if opts.Sidecar != "" {
-		engine, name, err = resolveSidecarContainerLocal(ctx, ex, box, instance, opts.Sidecar)
+		sel, name, err = resolveSidecarContainerLocal(ctx, ex, box, instance, opts.Sidecar)
 	} else {
-		engine, name, err = resolveContainerLocal(ctx, ex, box, instance)
+		sel, name, err = resolveContainerLocal(ctx, ex, box, instance)
 	}
 	if err != nil {
 		return nil, err
@@ -121,7 +122,7 @@ func resolvePodCmdPlan(ctx context.Context, ex *sdk.Executor, box, instance stri
 		agentEnv = agentFwd.Env
 	}
 
-	argv := []string{engine, "exec", "-i"}
+	argv := prependEngineGlobalArgs(sel.Target, []string{sel.binary(), "exec", "-i"})
 	argv = append(argv, envArgs(agentEnv)...)
 	argv = append(argv, name, "sh", "-c", strings.Join(cmd, " "))
 	return &spec.PodLiveStdioPlan{Script: shellQuoteArgs(argv)}, nil
@@ -151,16 +152,15 @@ func resolvePodLogsPlan(ctx context.Context, ex *sdk.Executor, box, instance str
 		return &spec.PodLiveStdioPlan{Script: shellQuoteArgs(argv)}, nil
 	}
 
-	engineName, err := boxEngineForDeploy(ctx, ex, boxName, instance, rt.RunEngine)
+	sel, err := resolvePodSelectionFor(ctx, ex, boxName, instance, rt)
 	if err != nil {
 		return nil, err
 	}
-	engine := kit.EngineBinary(engineName)
 	name := kit.ContainerNameInstance(boxName, instance)
 	if opts.Sidecar != "" {
 		name = kit.SidecarContainerNameInstance(boxName, instance, opts.Sidecar)
 	}
-	argv := []string{engine, "logs"}
+	argv := prependEngineGlobalArgs(sel.Target, []string{sel.binary(), "logs"})
 	if opts.Follow {
 		argv = append(argv, "-f")
 	}
@@ -184,7 +184,8 @@ func hostAttachScript(argv []string, wrapPTY bool) string {
 
 // buildShellArgs constructs the `<engine> run --rm -it|-i …` argument list. interactive is the
 // HOST-resolved tty boolean (replaces the former package-level forceTTY||isTerminal() read).
-func buildShellArgs(engine, imageRef string, uid, gid int, ports []string, volumes []deploykit.VolumeMount, bindMounts []deploykit.ResolvedBindMount, gpu bool, command string, bindAddr string, envVars []string, security spec.SecurityConfig, workingDir string, interactive bool, network ...string) []string {
+func buildShellArgs(target deploykit.ContainerdTarget, imageRef string, uid, gid int, ports []string, volumes []deploykit.VolumeMount, bindMounts []deploykit.ResolvedBindMount, gpu bool, command string, bindAddr string, envVars []string, security spec.SecurityConfig, workingDir string, interactive bool, network ...string) []string {
+	engine := string(target.Engine)
 	binary := kit.EngineBinary(engine)
 	interactiveFlag := "-i"
 	if interactive {
@@ -226,12 +227,12 @@ func buildShellArgs(engine, imageRef string, uid, gid int, ports []string, volum
 	if command != "" {
 		args = append(args, "-c", command)
 	}
-	return args
+	return prependEngineGlobalArgs(target, args)
 }
 
 // buildExecArgs constructs the `<engine> exec -it|-i …` list for attaching to a running container.
-func buildExecArgs(engine, name string, uid, gid int, command string, envVars []string, workingDir string, interactive bool) []string {
-	binary := kit.EngineBinary(engine)
+func buildExecArgs(target deploykit.ContainerdTarget, name string, uid, gid int, command string, envVars []string, workingDir string, interactive bool) []string {
+	binary := kit.EngineBinary(string(target.Engine))
 	interactiveFlag := "-i"
 	if interactive {
 		interactiveFlag = "-it"
@@ -246,7 +247,7 @@ func buildExecArgs(engine, name string, uid, gid int, command string, envVars []
 	if command != "" {
 		args = append(args, "-c", command)
 	}
-	return args
+	return prependEngineGlobalArgs(target, args)
 }
 
 // shellQuoteArgs joins args into a shell-safe command string.
@@ -264,8 +265,11 @@ func shellQuoteArgs(args []string) string {
 
 // containerRunningLocal mirrors charly-core shell.go's defaultContainerRunning (the `<engine>
 // container inspect --format '{{.State.Running}}'`-based check) VERBATIM — pure engine-exec probe.
-func containerRunningLocal(engine, name string) bool {
-	out, err := exec.Command(kit.EngineBinary(engine), "container", "inspect", "--format", "{{.State.Running}}", name).Output()
+func containerRunningLocal(target deploykit.ContainerdTarget, name string) bool {
+	argv := prependEngineGlobalArgs(target, []string{
+		kit.EngineBinary(string(target.Engine)), "container", "inspect", "--format", "{{.State.Running}}", name,
+	})
+	out, err := exec.Command(argv[0], argv[1:]...).Output()
 	if err != nil {
 		return false
 	}
@@ -273,42 +277,40 @@ func containerRunningLocal(engine, name string) bool {
 }
 
 // resolveContainerLocal mirrors charly-core container.go's resolveContainer.
-func resolveContainerLocal(ctx context.Context, ex *sdk.Executor, box, instance string) (engine, name string, err error) {
+func resolveContainerLocal(ctx context.Context, ex *sdk.Executor, box, instance string) (podSelection, string, error) {
 	if box == "." {
-		return "", "", nil
+		return podSelection{}, "", nil
 	}
 	rt, err := kit.ResolveRuntime()
 	if err != nil {
-		return "", "", err
+		return podSelection{}, "", err
 	}
 	boxName := resolveBoxName(box)
-	runEngine, err := boxEngineForDeploy(ctx, ex, boxName, instance, rt.RunEngine)
+	sel, err := resolvePodSelectionFor(ctx, ex, boxName, instance, rt)
 	if err != nil {
-		return "", "", err
+		return podSelection{}, "", err
 	}
-	engine = kit.EngineBinary(runEngine)
-	name = kit.ContainerNameInstance(boxName, instance)
-	if !containerRunningLocal(engine, name) {
-		return "", "", fmt.Errorf("container %s is not running", name)
+	name := kit.ContainerNameInstance(boxName, instance)
+	if !containerRunningLocal(sel.Target, name) {
+		return podSelection{}, "", fmt.Errorf("container %s is not running", name)
 	}
-	return engine, name, nil
+	return sel, name, nil
 }
 
 // resolveSidecarContainerLocal mirrors sdk/deploykit.ResolveSidecarContainer.
-func resolveSidecarContainerLocal(ctx context.Context, ex *sdk.Executor, box, instance, sidecar string) (engine, name string, err error) {
+func resolveSidecarContainerLocal(ctx context.Context, ex *sdk.Executor, box, instance, sidecar string) (podSelection, string, error) {
 	rt, err := kit.ResolveRuntime()
 	if err != nil {
-		return "", "", err
+		return podSelection{}, "", err
 	}
 	boxName := resolveBoxName(box)
-	runEngine, err := boxEngineForDeploy(ctx, ex, boxName, instance, rt.RunEngine)
+	sel, err := resolvePodSelectionFor(ctx, ex, boxName, instance, rt)
 	if err != nil {
-		return "", "", err
+		return podSelection{}, "", err
 	}
-	engine = kit.EngineBinary(runEngine)
-	name = kit.SidecarContainerNameInstance(boxName, instance, sidecar)
-	if !containerRunningLocal(engine, name) {
-		return "", "", fmt.Errorf("sidecar container %s is not running", name)
+	name := kit.SidecarContainerNameInstance(boxName, instance, sidecar)
+	if !containerRunningLocal(sel.Target, name) {
+		return podSelection{}, "", fmt.Errorf("sidecar container %s is not running", name)
 	}
-	return engine, name, nil
+	return sel, name, nil
 }

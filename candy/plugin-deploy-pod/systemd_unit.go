@@ -21,10 +21,10 @@ import (
 // writeSystemdUnitConfig emits the engine's supervision unit and (when configured) the
 // cloudflare tunnel companion unit, then returns the written paths. The caller reloads the
 // systemd user daemon and enables the tunnel exactly as it already does for the quadlet path.
-func writeSystemdUnitConfig(rt *kit.ResolvedRuntime, qcfg deploykit.QuadletConfig, bindMounts []deploykit.ResolvedBindMount, sidecars []deploykit.ResolvedSidecar, tunnelCfg *spec.TunnelConfig) ([]string, error) {
-	engine := rt.RunEngine
-	if rootfulUnsupported(rt) {
-		return nil, rootfulRefusal(engine, rt.RunMode)
+func writeSystemdUnitConfig(rt *kit.ResolvedRuntime, sel podSelection, qcfg deploykit.QuadletConfig, bindMounts []deploykit.ResolvedBindMount, sidecars []deploykit.ResolvedSidecar, tunnelCfg *spec.TunnelConfig) ([]string, error) {
+	engine := string(sel.Engine)
+	if rootfulUnsupported(sel.Target, rt.RunMode) {
+		return nil, rootfulRefusal(sel.Engine, rt.RunMode)
 	}
 	// A bare `KEY` env entry means "inherit this variable from the host"; systemd's
 	// Environment= has no inherit form and EngineUnitRequest carries no PassEnvironment
@@ -43,7 +43,7 @@ func writeSystemdUnitConfig(rt *kit.ResolvedRuntime, qcfg deploykit.QuadletConfi
 
 	name := kit.ContainerNameInstance(qcfg.BoxName, qcfg.Instance)
 	workingDir := deploykit.ResolveWorkingDir(qcfg.Volumes, bindMounts, qcfg.Home, qcfg.BoxName, qcfg.Instance)
-	argv, _, err := engineRunArgv(engine, false, podEngineRun{
+	argv, _, err := engineRunArgv(sel.Target, podEngineRun{
 		Image:      qcfg.ImageRef,
 		Name:       name,
 		Network:    qcfg.Network,
@@ -73,7 +73,7 @@ func writeSystemdUnitConfig(rt *kit.ResolvedRuntime, qcfg deploykit.QuadletConfi
 		Name:        unitName,
 		RunMode:     "systemd-unit",
 		StartArgv:   argv,
-		StopArgv:    engineStopArgv(engine, name),
+		StopArgv:    engineStopArgv(sel.Target, name),
 		Description: "charly deployment " + name,
 		WorkingDir:  workingDir,
 	})

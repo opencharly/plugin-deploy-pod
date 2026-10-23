@@ -45,17 +45,17 @@ type podEngineRun struct {
 }
 
 // engineRunArgv builds a launch argv through the engine class's `start_plan` body and returns
-// the engine's own run mode. It is always the ROOTLESS argv: a rootful target that would need
-// a privilege prefix is refused by rootfulUnsupported before any caller reaches here. Every
-// launch of an engine that declares runtime_handlers carries `--runtime <handler>` selected
-// from that set, so a containerd launch never relies on the daemon's default handler.
-func engineRunArgv(engine string, rootful bool, r podEngineRun) ([]string, string, error) {
+// the engine's own run mode. The engine word and every target fact come from the RESOLVED
+// selection (selection.go), so the argv, the store and the unit all address the same target.
+// A rootful target that would need a privilege prefix is refused by rootfulUnsupported before
+// any caller reaches here. Every launch of an engine that declares runtime_handlers carries
+// `--runtime <handler>` selected from that set, so a containerd launch never relies on the
+// daemon's default handler.
+func engineRunArgv(target deploykit.ContainerdTarget, r podEngineRun) ([]string, string, error) {
+	engine := string(target.Engine)
 	c, ok := container.EngineCapabilityFor(engine)
 	if !ok {
 		return nil, "", fmt.Errorf("engine.run: no capability row for %q", engine)
-	}
-	if rootful && !c.SupportsRootful {
-		return nil, "", fmt.Errorf("engine %q does not support rootful launches", engine)
 	}
 	extra := make([]string, 0, 16)
 	if r.Remove && !c.NoRemoveWithDetach {
@@ -94,7 +94,7 @@ func engineRunArgv(engine string, rootful bool, r podEngineRun) ([]string, strin
 		Image:     r.Image,
 		Engine:    engine,
 		Network:   r.Network,
-		Rootful:   rootful,
+		Rootful:   target.Rootful,
 		Runtime:   engineDefaultRuntime(c),
 		Detach:    r.Detach,
 		Ports:     r.Ports,
@@ -118,7 +118,7 @@ func engineRunArgv(engine string, rootful bool, r podEngineRun) ([]string, strin
 	if rep.Error != "" {
 		return nil, "", fmt.Errorf("engine start_plan (%s): %s", engine, rep.Error)
 	}
-	argv := prependEngineGlobalArgs(c, rep.Argv)
+	argv := prependEngineGlobalArgs(target, rep.Argv)
 	// No privilege_prefix is applied here: rootfulUnsupported refuses every rootful engine
 	// that declares one (containerd), and an engine without one has an empty prefix, so this
 	// argv is always the rootless form. Adding a prefix on an unreachable arm would be a
@@ -136,24 +136,25 @@ func engineDefaultRuntime(c spec.EngineCapability) string {
 	return c.RuntimeHandlers[0]
 }
 
-// engineGlobalArgs returns the engine CLI's connection flags, from the capability row. Only
-// an engine with a separate daemon endpoint declares them (containerd: address + namespace),
-// so podman and docker are unchanged.
-func engineGlobalArgs(c spec.EngineCapability) []string {
+// engineGlobalArgs returns the engine CLI's connection flags from the RESOLVED target. Only
+// an engine with a separate daemon endpoint declares an address (containerd), so podman and
+// docker are unchanged; the namespace is the resolved one (deploy > settings > capability
+// default), never the capability default alone.
+func engineGlobalArgs(target deploykit.ContainerdTarget) []string {
 	out := make([]string, 0, 2)
-	if c.Address != "" {
-		out = append(out, "--address", c.Address)
+	if target.Address != "" {
+		out = append(out, "--address", target.Address)
 	}
-	if c.Namespace != "" {
-		out = append(out, "--namespace", c.Namespace)
+	if target.Namespace != "" {
+		out = append(out, "--namespace", target.Namespace)
 	}
 	return out
 }
 
 // prependEngineGlobalArgs inserts the connection flags BEFORE the subcommand, which is where
 // the engine CLI accepts persistent flags (nerdctl: `nerdctl --address … --namespace … run …`).
-func prependEngineGlobalArgs(c spec.EngineCapability, argv []string) []string {
-	globals := engineGlobalArgs(c)
+func prependEngineGlobalArgs(target deploykit.ContainerdTarget, argv []string) []string {
+	globals := engineGlobalArgs(target)
 	if len(globals) == 0 || len(argv) == 0 {
 		return argv
 	}
@@ -165,15 +166,13 @@ func prependEngineGlobalArgs(c spec.EngineCapability, argv []string) []string {
 }
 
 // engineStopArgv builds `<binary> <globals> stop <name>`.
-func engineStopArgv(engine, name string) []string {
-	c, _ := container.EngineCapabilityFor(engine)
-	return prependEngineGlobalArgs(c, []string{kit.EngineBinary(engine), "stop", name})
+func engineStopArgv(target deploykit.ContainerdTarget, name string) []string {
+	return prependEngineGlobalArgs(target, []string{kit.EngineBinary(string(target.Engine)), "stop", name})
 }
 
 // engineRemoveArgv builds `<binary> <globals> rm -f <name>`.
-func engineRemoveArgv(engine, name string) []string {
-	c, _ := container.EngineCapabilityFor(engine)
-	return prependEngineGlobalArgs(c, []string{kit.EngineBinary(engine), "rm", "-f", name})
+func engineRemoveArgv(target deploykit.ContainerdTarget, name string) []string {
+	return prependEngineGlobalArgs(target, []string{kit.EngineBinary(string(target.Engine)), "rm", "-f", name})
 }
 
 // engineUnitFiles renders the supervision unit through the engine class's `unit_emit` body.
@@ -210,33 +209,23 @@ func engineUsesCDI(engine string) bool {
 	return ok && c.GPUArgStyle == "cdi"
 }
 
-// podRootful reports whether the host config asks for the rootful mode. `auto` is the
-// pre-resolution selector; every concrete mode ("sudo", "native", "machine") is an explicit
-// rootful request.
-func podRootful(rt *kit.ResolvedRuntime) bool {
-	return rt.Rootful != "" && rt.Rootful != "auto"
-}
-
 // rootfulRefusal is the honest answer where this plugin cannot finish a rootful deploy safely:
 // system-scope units and a rootful image store are not implemented here, so silently running
 // the rootless arm would deploy a different target than the operator asked for.
-func rootfulRefusal(engine, mode string) error {
+func rootfulRefusal(engine spec.EngineName, mode string) error {
 	return fmt.Errorf("engine %q: rootful %s deploys are not implemented by plugin-deploy-pod yet (system-scope unit emission and a rootful image store are missing); remedy: run rootless (engine.rootful=auto), or use engine: podman (quadlet) for a rootful pod", engine, mode)
 }
 
-// rootfulUnsupported reports the rootful targets this plugin refuses. It is capability-driven:
-// a systemd-unit mode needs system-scope emission, and an engine with a privilege_prefix
-// expects a root daemon the rootless staging path cannot reach. An engine with neither (podman
-// quadlet) keeps its existing behaviour untouched.
-func rootfulUnsupported(rt *kit.ResolvedRuntime) bool {
-	if !podRootful(rt) {
+// rootfulUnsupported reports the rootful targets this plugin refuses. It reads the RESOLVED
+// target: `Rootful` already folds the flag/deploy/env/settings levels, and the privilege prefix
+// is the capability fact. A systemd-unit mode needs system-scope emission, and an engine with a
+// privilege prefix expects a root daemon the rootless staging path cannot reach. An engine with
+// neither (podman quadlet) keeps its existing behaviour untouched.
+func rootfulUnsupported(target deploykit.ContainerdTarget, runMode string) bool {
+	if !target.Rootful {
 		return false
 	}
-	if rt.RunMode == "systemd-unit" {
-		return true
-	}
-	c, ok := container.EngineCapabilityFor(rt.RunEngine)
-	return ok && c.PrivilegePrefix != ""
+	return runMode == "systemd-unit" || target.PrivilegePrefix != ""
 }
 
 // envArgs renders the pod's env entries as engine CLI `-e` arguments, VERBATIM. An engine

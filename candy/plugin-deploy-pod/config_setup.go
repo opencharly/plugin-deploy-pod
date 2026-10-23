@@ -91,12 +91,6 @@ func runPodConfigSetup(ctx context.Context, ex *sdk.Executor, c *spec.PodConfigS
 	default:
 		return fmt.Errorf("charly config requires run_mode=quadlet, systemd-unit, or direct (current: %s)", rt.RunMode)
 	}
-	// A rootful target is explicit, and this plugin cannot finish one safely: the image store
-	// staging runs rootless and system-scope unit emission is unimplemented. Refuse with the
-	// remedy rather than silently deploying the rootless arm the operator did not ask for.
-	if rootfulUnsupported(rt) {
-		return rootfulRefusal(rt.RunEngine, rt.RunMode)
-	}
 	if c.Box == "" {
 		return fmt.Errorf("image name is required")
 	}
@@ -107,7 +101,22 @@ func runPodConfigSetup(ctx context.Context, ex *sdk.Executor, c *spec.PodConfigS
 	if err := deploykit.RejectImageRefAsDeployName(c.Box); err != nil {
 		return err
 	}
-	return runConfig(ctx, ex, rt, c)
+	// Resolve the selection ONCE for the whole config run. A rootful target is explicit, and
+	// this plugin cannot finish one safely: the image store staging runs rootless and
+	// system-scope unit emission is unimplemented. Refuse with the remedy rather than silently
+	// deploying the rootless arm the operator did not ask for.
+	dc, err := loadDeploy(ctx, ex, "charly config")
+	if err != nil {
+		return err
+	}
+	sel, err := resolvePodSelectionFromConfig(dc, c.Box, c.Instance, rt)
+	if err != nil {
+		return err
+	}
+	if rootfulUnsupported(sel.Target, rt.RunMode) {
+		return rootfulRefusal(sel.Engine, rt.RunMode)
+	}
+	return runConfig(ctx, ex, rt, sel, c)
 }
 
 // resolveDeployRef mirrors the former BoxConfigSetupCmd.resolveDeployRef, resolved plugin-side
@@ -177,7 +186,7 @@ var mutateDeploy = func(ctx context.Context, ex *sdk.Executor, caller string, mu
 }
 
 //nolint:gocyclo // ported 1:1 from charly-core BoxConfigSetupCmd.runConfig — see the file header; splitting further would fragment the seam-call sequencing across files for no clarity gain
-func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, c *spec.PodConfigSetupRequest) error {
+func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, sel podSelection, c *spec.PodConfigSetupRequest) error {
 	// Device detection runs plugin-side (detect_devices.go — the relocated
 	// "pod-config-detect-devices" seam, peer InvokeProvider verb:gpu). The former seam's call
 	// passed NO engine (only NoAutoDetect), so the ensure-cdi leg never fired at config time —
@@ -188,13 +197,13 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, c
 	if err != nil {
 		return err
 	}
-	if err := ensureImagePresent(ctx, ex, imageRef, rt.RunEngine); err != nil {
+	if err := ensureImagePresent(ctx, ex, imageRef, sel.Target); err != nil {
 		return err
 	}
 	// ExtractMetadata PLUGIN-SIDE (#55 coneC-dsh — the pod-config-ensure-image host seam shrinks to
 	// the host-coupled ensureImagePresent leg; the deploykit label extract runs here, shedding the
 	// host leg's deploykit import).
-	metaPtr, err := deploykit.ExtractMetadata(rt.RunEngine, imageRef)
+	metaPtr, err := deploykit.ExtractMetadata(string(sel.Engine), imageRef)
 	if err != nil {
 		return err
 	}
@@ -255,7 +264,7 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, c
 	// emission path below (the direct return and the quadlet write) and before any start, so the
 	// ownership is right however the container is created; `charly remove` keeps named volumes, so
 	// the re-run of an existing deploy is the normal case this must repair.
-	if err := reconcileNamedVolumeRoots(ctx, ex, rt.RunEngine, volumeRootKeepID(rt.RunMode, rt.RunEngine, len(bindMounts)), uid, gid, imageRef, volumes); err != nil {
+	if err := reconcileNamedVolumeRoots(ctx, ex, string(sel.Engine), volumeRootKeepID(rt.RunMode, string(sel.Engine), len(bindMounts)), uid, gid, imageRef, volumes); err != nil {
 		return err
 	}
 
@@ -337,17 +346,17 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, c
 	}
 	envVars = appendAutoDetectedEnv(envVars, detected)
 
-	resolvedNetwork, netErr := kit.ResolveNetwork(network, rt.RunEngine)
+	resolvedNetwork, netErr := kit.ResolveNetwork(network, string(sel.Engine))
 	if netErr != nil {
 		return netErr
 	}
 
-	if conflicts := kit.CheckPortAvailability(ports, rt.BindAddress, rt.RunEngine); len(conflicts) > 0 {
+	if conflicts := kit.CheckPortAvailability(ports, rt.BindAddress, string(sel.Engine)); len(conflicts) > 0 {
 		fmt.Fprintf(os.Stderr, "Warning: port conflicts detected:%s", kit.FormatPortConflicts(conflicts, c.Box))
 	}
 
 	autoGen := c.Password == "auto"
-	provisioned, provFallback, provResolutions, isKeyring, perr := resolvePodProvisionSecrets(ctx, ex, &meta, c.Box, c.Instance, rt.RunEngine, autoGen, c.RefreshSecret)
+	provisioned, provFallback, provResolutions, isKeyring, perr := resolvePodProvisionSecrets(ctx, ex, &meta, c.Box, c.Instance, string(sel.Engine), autoGen, c.RefreshSecret)
 	if perr != nil {
 		return perr
 	}
@@ -379,7 +388,7 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, c
 	var resolvedSidecars []deploykit.ResolvedSidecar
 	var deploySidecars map[string]json.RawMessage
 	if len(deploySidecarsRaw) > 0 {
-		scRes, err := resolvePodSidecars(ctx, ex, deploySidecarsRaw, deploykit.SidecarTemplatesOf(dc), c.Env, c.Box, c.Instance, rt.RunEngine, autoGen, c.RefreshSecret)
+		scRes, err := resolvePodSidecars(ctx, ex, deploySidecarsRaw, deploykit.SidecarTemplatesOf(dc), c.Env, c.Box, c.Instance, string(sel.Engine), autoGen, c.RefreshSecret)
 		if err != nil {
 			return scErr(err)
 		}
@@ -424,11 +433,11 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, c
 	deploySaveState(ctx, ex, c.Box, c.Instance, saveInput)
 
 	if rt.RunMode == "direct" {
-		return runConfigDirect(rt, qcfg, bindMounts, resolvedSidecars, tunnelCfg)
+		return runConfigDirect(rt, sel, qcfg, bindMounts, resolvedSidecars, tunnelCfg)
 	}
 
 	if rt.RunMode == "systemd-unit" {
-		written, werr := writeSystemdUnitConfig(rt, qcfg, bindMounts, resolvedSidecars, tunnelCfg)
+		written, werr := writeSystemdUnitConfig(rt, sel, qcfg, bindMounts, resolvedSidecars, tunnelCfg)
 		if werr != nil {
 			return werr
 		}
@@ -550,7 +559,7 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, c
 		if err := start.Run(); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to start %s for post_enable hook: %v\n", svc, err)
 		} else {
-			engine := kit.EngineBinary(rt.RunEngine)
+			engine := sel.binary()
 			hookSecretEnv := resolvePodHookSecretEnv(ctx, ex, &meta, c.Box, c.Instance)
 			hookEnv := append(append([]string{}, c.Env...), hookSecretEnv...)
 			if err := runHook(engine, ctrName, hooks.PostEnable, hookEnv); err != nil {

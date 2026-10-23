@@ -17,7 +17,7 @@ import (
 
 func TestBuildStartArgs_HostnameParity(t *testing.T) {
 	argv, err := buildStartArgs(
-		"podman", false,
+		selectionForTest(t, deploykit.Selection{}, "podman"),
 		"ghcr.io/opencharly/demo:latest",
 		1000, 1000,
 		nil,                             // ports
