@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/deploykit"
@@ -64,6 +65,43 @@ func resolveDeployBoxNameLocal(ctx context.Context, ex *sdk.Executor, dc *deploy
 		return img
 	}
 	return box
+}
+
+// resolveBaseBoxName returns the BASE BOX NAME a pod lifecycle op must build/deploy from. It is the
+// ONE implementation of "a deploy KEY is never a box name" (R2): podPrepareVenue and podRebuild
+// call it instead of spelling the image/deploy-name fallback themselves.
+//
+// An explicit image (the host resolved the deploy entry itself) wins untouched. Otherwise the
+// deploy KEY is resolved through the SAME deploy-key→box resolver `charly config` uses
+// (resolveDeployBoxNameLocal): the per-host overlay first, then the PROJECT config. Handing the
+// raw key to the build pipeline is what produced `unknown box "charly/check-sidecar-pod"`
+// (opencharly/plugin-build#46).
+//
+// A namespaced deploy has TWO spellings: the deploy KEY a qualified bed is dispatched under is
+// `ns/name` (spec.DeployKey), while the project projection keys it namespace-qualified as
+// `ns.name` (spec.UnifiedFile.Deploys). Both are tried — the exact key first (a local instance
+// deploy keeps its slash spelling in the project map), then the namespace-qualified form — so a
+// fresh `deploy add` (no per-host entry yet) still resolves the declared image.
+//
+// Only a genuinely unresolvable key falls back to the key itself (the key==image convention).
+func resolveBaseBoxName(ctx context.Context, ex *sdk.Executor, name, image, caller string) string {
+	if image != "" {
+		return image
+	}
+	dc, err := loadDeploy(ctx, ex, caller)
+	if err != nil {
+		return name
+	}
+	candidates := []string{name}
+	if i := strings.IndexByte(name, '/'); i > 0 {
+		candidates = append(candidates, name[:i]+"."+name[i+1:])
+	}
+	for _, candidate := range candidates {
+		if resolved := resolveDeployBoxNameLocal(ctx, ex, dc, candidate, ""); resolved != candidate {
+			return resolved
+		}
+	}
+	return name
 }
 
 // projectConnect and loadUnifiedForBox are the two executor-backed legs of the project

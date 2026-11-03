@@ -314,11 +314,10 @@ func podPrepareVenue(ctx context.Context, exec *sdk.Executor, p lifecycleParams)
 	}
 
 	// The base box name — the key into the render-prepped envelope's Boxes (fetched below via the
-	// build:generate resolve call) — is the SAME base the host prep used (req.Image / req.DeployName).
-	baseName := p.Image
-	if baseName == "" {
-		baseName = p.Name
-	}
+	// build:generate resolve call). An explicit image wins untouched; otherwise the deploy KEY is
+	// resolved through the plugin's own deploy-key→box resolver, because a key is not a box name
+	// (a qualified bed is dispatched as `ns/name` while its box is the declared `image:`).
+	baseName := resolveBaseBoxName(ctx, exec, p.Name, p.Image, "pod prepare-venue")
 
 	// Base-image metadata (User/Security/Registry) — read PLUGIN-SIDE (K3-W2): the host prep only
 	// resolves+returns reply.BaseImage (the ref); this candy already imports deploykit, so it reads
@@ -527,14 +526,14 @@ func podRebuild(ctx context.Context, exec *sdk.Executor, p lifecycleParams) (*pb
 			return nil, fmt.Errorf("plugin-deploy-pod rebuild: decode opts: %w", err)
 		}
 	}
-	baseRef := p.Image
-	if baseRef == "" {
-		baseRef = p.Name
-	}
 	if ropts.DryRun {
 		return marshalReply(struct{}{}) // dry-run: the host proxy prints nothing for Rebuild
 	}
 	if ropts.RebuildImage {
+		// Same resolution rule as podPrepareVenue: `box build`/`check box` take a BOX name, and the
+		// lifecycle params carry the deploy KEY (a qualified bed's key is `ns/name`), never the key
+		// verbatim — opencharly/plugin-build#46.
+		baseRef := resolveBaseBoxName(ctx, exec, p.Name, p.Image, "pod rebuild")
 		if _, err := podCli(ctx, exec, false, false, "box", "build", baseRef); err != nil {
 			return nil, err
 		}

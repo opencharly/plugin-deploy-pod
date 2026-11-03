@@ -131,7 +131,12 @@ func resolveDeployRef(ctx context.Context, ex *sdk.Executor, c *spec.PodConfigSe
 // LoadDeployConfigForRead(caller) swallow): a load error degrades to (nil, nil) + a stderr warning,
 // so a config setup that finds no overlay proceeds with image-label-driven behavior (the same
 // graceful degradation the host leg made).
-func loadDeploy(ctx context.Context, ex *sdk.Executor, caller string) (*deploykit.DeployConfig, error) {
+//
+// It is a package var (not a plain func) for the SAME reason saveDeploy / mutateDeploy /
+// projectConnect are: a unit test with no reverse-channel executor must be able to stub the
+// per-host read instead of driving loaderkit against the operator's real ~/.config/charly, which
+// cannot succeed and would print the degradation warning into the test output.
+var loadDeploy = func(ctx context.Context, ex *sdk.Executor, caller string) (*deploykit.DeployConfig, error) {
 	dc, err := loaderkit.LoadHostDeployConfigViaExecutor(ctx, ex)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: %s: charly.yml unavailable for read: %v\n", caller, err)
