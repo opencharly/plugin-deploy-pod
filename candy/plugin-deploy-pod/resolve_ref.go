@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/deploykit"
@@ -41,7 +40,7 @@ func resolveDeployRefLocal(ctx context.Context, ex *sdk.Executor, box, instance,
 	if err != nil {
 		return "", "", err
 	}
-	deployBoxName = resolveDeployBoxNameLocal(ctx, ex, dc, box, instance)
+	deployBoxName, _ = resolveDeployBoxNameForKey(ctx, ex, dc, spec.DeployKey(box, instance))
 	if ov := resolvedOverlayImage(dc, box, instance); ov != "" {
 		rt, rtErr := kit.ResolveRuntime()
 		if rtErr != nil {
@@ -58,30 +57,14 @@ func resolveDeployRefLocal(ctx context.Context, ex *sdk.Executor, box, instance,
 	return deployBoxName, kit.ResolveShellImageRef("", deployBoxName, tag), nil
 }
 
-// resolveDeployBoxNameLocal mirrors the former host box-name resolver: the deploy entry's declared
-// box (per-host then project), falling back to the key itself (the key==image convention).
-func resolveDeployBoxNameLocal(ctx context.Context, ex *sdk.Executor, dc *deploykit.DeployConfig, box, instance string) string {
-	if img := deployKeyToBoxLocal(ctx, ex, dc, box, instance); img != "" {
-		return img
-	}
-	return box
-}
-
 // resolveBaseBoxName returns the BASE BOX NAME a pod lifecycle op must build/deploy from. It is the
 // ONE implementation of "a deploy KEY is never a box name" (R2): podPrepareVenue and podRebuild
 // call it instead of spelling the image/deploy-name fallback themselves.
 //
 // An explicit image (the host resolved the deploy entry itself) wins untouched. Otherwise the
-// deploy KEY is resolved through the SAME deploy-key→box resolver `charly config` uses
-// (resolveDeployBoxNameLocal): the per-host overlay first, then the PROJECT config. Handing the
+// deploy KEY is resolved through the deploy-key→box rule (resolveDeployBoxNameForKey). Handing the
 // raw key to the build pipeline is what produced `unknown box "charly/check-sidecar-pod"`
 // (opencharly/plugin-build#46).
-//
-// A namespaced deploy has TWO spellings: the deploy KEY a qualified bed is dispatched under is
-// `ns/name` (spec.DeployKey), while the project projection keys it namespace-qualified as
-// `ns.name` (spec.UnifiedFile.Deploys). Both are tried — the exact key first (a local instance
-// deploy keeps its slash spelling in the project map), then the namespace-qualified form — so a
-// fresh `deploy add` (no per-host entry yet) still resolves the declared image.
 //
 // Only a genuinely unresolvable key falls back to the key itself (the key==image convention).
 func resolveBaseBoxName(ctx context.Context, ex *sdk.Executor, name, image, caller string) string {
@@ -92,16 +75,43 @@ func resolveBaseBoxName(ctx context.Context, ex *sdk.Executor, name, image, call
 	if err != nil {
 		return name
 	}
-	candidates := []string{name}
-	if i := strings.IndexByte(name, '/'); i > 0 {
-		candidates = append(candidates, name[:i]+"."+name[i+1:])
-	}
-	for _, candidate := range candidates {
-		if resolved := resolveDeployBoxNameLocal(ctx, ex, dc, candidate, ""); resolved != candidate {
-			return resolved
-		}
+	if resolved, ok := resolveDeployBoxNameForKey(ctx, ex, dc, name); ok {
+		return resolved
 	}
 	return name
+}
+
+// resolveDeployBoxNameForKey resolves a deploy KEY to the BOX name its deploy entry declares,
+// trying every spelling a namespaced deploy can carry. It is the ONE "given a deploy key, which
+// box?" rule: the config ref resolution (resolveDeployRefLocal) and the lifecycle paths
+// (resolveBaseBoxName) both go through it, so no caller can hand a deploy key to the box
+// namespace.
+//
+// A deploy has TWO spellings: the KEY is `ns/name` (spec.DeployKey), while the PROJECT projection
+// keys a namespaced deploy `ns.name` (spec.UnifiedFile.Deploys). This tries, in order:
+//   - the key's base/instance pair (per-host overlay DeployKey then bare key, then the project's
+//     base entry — the pre-existing rule, unchanged);
+//   - the exact deploy key (a local instance deploy keeps its slash spelling in the project map);
+//   - the namespace-qualified form (`ns.name`), which is how the project stores a namespaced
+//     deploy — the leg a fresh `deploy add` needs, before any per-host entry exists.
+//
+// The bool reports whether an entry was found. Callers keep their OWN fallback: the config path
+// keeps the bare base name (the key==image convention), the lifecycle paths keep the key.
+func resolveDeployBoxNameForKey(ctx context.Context, ex *sdk.Executor, dc *deploykit.DeployConfig, key string) (string, bool) {
+	box, instance := spec.ParseDeployKey(key)
+	if img := deployKeyToBoxLocal(ctx, ex, dc, box, instance); img != "" {
+		return img, true
+	}
+	if instance == "" {
+		return box, false
+	}
+	if img := deployKeyToBoxLocal(ctx, ex, dc, key, ""); img != "" {
+		return img, true
+	}
+	if img := deployKeyToBoxLocal(ctx, ex, dc, box+"."+instance, ""); img != "" {
+		return img, true
+	}
+	return box, false
 }
 
 // projectConnect and loadUnifiedForBox are the two executor-backed legs of the project

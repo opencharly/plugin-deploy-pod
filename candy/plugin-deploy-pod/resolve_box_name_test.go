@@ -72,6 +72,26 @@ func TestResolveBaseBoxName_QualifiedDeployKeyResolvesProjectImage(t *testing.T)
 		}
 	})
 
+	// The SAME rule drives `charly config`: the bed runner hands config the deploy key
+	// `charly/check-sidecar-pod`, which canonicalizes to (charly, check-sidecar-pod). Pre-fix,
+	// resolveDeployRefLocal resolved the bare first segment and built the ref `charly:<tag>` — a ref
+	// nothing ever built (measured). The config leg and the lifecycle leg share one resolver, so a
+	// fix that covered only prepare-venue would hand the bed a config failure one step later.
+	t.Run("config ref resolution uses the same rule", func(t *testing.T) {
+		stubNoPerHost(t)
+		stubProject(t, namespaced)
+		box, ref, err := resolveDeployRefLocal(context.Background(), nil, "charly", "check-sidecar-pod", "testtag", "")
+		if err != nil {
+			t.Fatalf("resolveDeployRefLocal: %v", err)
+		}
+		if box != "check-k8s-deploy-app" {
+			t.Fatalf("resolveDeployRefLocal box = %q, want %q — the config path must resolve the same deploy entry", box, "check-k8s-deploy-app")
+		}
+		if ref != "check-k8s-deploy-app:testtag" {
+			t.Fatalf("resolveDeployRefLocal ref = %q, want %q", ref, "check-k8s-deploy-app:testtag")
+		}
+	})
+
 	// The supporting mechanism: splitting the key into (base, instance) and handing those to the
 	// resolver does NOT find the project entry, because the project key is `charly.check-sidecar-pod`
 	// — not the bare first segment `charly`. This is why the fix must try the namespace-qualified
