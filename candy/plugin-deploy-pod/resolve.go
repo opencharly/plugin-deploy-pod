@@ -188,11 +188,9 @@ func resolvePodRuntimeImageWith(ctx context.Context, ex *sdk.Executor, box, inst
 
 	cliVolumes := parseVolumeFlagsCLI(volumeFlag, bind)
 	volumes, bindMounts := deploykit.ResolveVolumeBacking(box, instance, meta.Volume, mergeVolumeConfigsLocal(deployVolumes, cliVolumes), meta.Home, rt.EncryptedStoragePath, rt.VolumesPath)
-	if meta.Registry != "" {
-		if _, ref, e := resolveDeployRefLocal(ctx, ex, box, instance, tag, ""); e == nil {
-			imageRef = ref
-		}
-	}
+	// imageRef came from resolveDeployRefLocal, which already applies the box→image naming rule
+	// (registry → leaf) before the existence check — the ONE place the ref is composed. The
+	// former re-resolve-on-meta.Registry branch was a second naming rule applied after the fact.
 	return &podRuntimeImage{detected: detected, sel: sel, imageRef: imageRef, meta: &meta, dc: dc, volumes: volumes, bindMounts: bindMounts}, nil
 }
 

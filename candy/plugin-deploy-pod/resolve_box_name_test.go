@@ -159,3 +159,69 @@ func TestResolveBaseBoxName_QualifiedDeployKeyResolvesProjectImage(t *testing.T)
 		}
 	})
 }
+
+// TestResolveDeployRefLocal_QualifiesTheBoxBuildRef is the R7 regression for the config half of
+// the R10 failure measured on run 2026.307.2336 (`charly.check-sidecar-pod`):
+//
+//	ensure-image: building charly.check-k8s-deploy-app locally
+//	charly: error: ... image not found in local storage:
+//	  charly.check-k8s-deploy-app:charly.check-sidecar-pod-2026.307.2336
+//
+// The deploy-add step had persisted the deploy entry with the NAMESPACE-QUALIFIED BOX ADDRESS
+// (`charly.check-k8s-deploy-app`) in `image:` — a value that names a box, not an image repo. The
+// config resolver composed `<box address>:<tag>` and handed it to ensure-image. The image the
+// build had actually produced is `ghcr.io/opencharly/check-k8s-deploy-app:<tag>`: the box LEAF
+// under its NAMESPACE's defaults.registry.
+//
+// This is the plugin side of the ONE box→image naming rule the host build path applies
+// (resolveBoxImageRegistryName + ResolveShellImageRef). It FAILS without the fix: the ref comes
+// back as the bare namespace-qualified address.
+func TestResolveDeployRefLocal_QualifiesTheBoxBuildRef(t *testing.T) {
+	const (
+		registry = "ghcr.io/opencharly"
+		leaf     = "check-k8s-deploy-app"
+		tag      = "charly.check-sidecar-pod-2026.307.2336"
+	)
+	origLoad, origConnect, origLoadUnified := loadDeploy, projectConnect, loadUnifiedForBox
+	t.Cleanup(func() {
+		loadDeploy, projectConnect, loadUnifiedForBox = origLoad, origConnect, origLoadUnified
+	})
+
+	// The project the build ran against: the box lives in the `charly` namespace, whose
+	// defaults.registry is the prefix the build applied.
+	ns := &spec.UnifiedFile{Defaults: spec.BoxConfig{Registry: registry}}
+	ns.SetBox(leaf, spec.BoxConfig{})
+	project := &spec.UnifiedFile{Namespaces: map[string]*spec.UnifiedFile{"charly": ns}}
+	projectConnect = func(_ context.Context, _ *sdk.Executor, _ string, pre *spec.DeployPluginsConnectReply) error {
+		pre.Dir = "/project"
+		return nil
+	}
+	loadUnifiedForBox = func(_ context.Context, _ *sdk.Executor, _ string) (*spec.UnifiedFile, bool, error) {
+		return project, true, nil
+	}
+
+	// Two spellings reach this resolver, and NEITHER is an image repo: the namespace-qualified
+	// BOX ADDRESS `deploy add` persists in the per-host `image:`, and the project deploy map's
+	// bare LEAF. Both must compose the leaf under the namespace's registry.
+	for _, boxRef := range []string{"charly." + leaf, leaf} {
+		t.Run(boxRef, func(t *testing.T) {
+			loadDeploy = func(_ context.Context, _ *sdk.Executor, _ string) (*deploykit.DeployConfig, error) {
+				return &deploykit.DeployConfig{Deploy: map[string]deploykit.DeployNode{
+					"charly.check-sidecar-pod": {Target: "pod", Image: boxRef},
+				}}, nil
+			}
+
+			box, ref, err := resolveDeployRefLocal(context.Background(), nil, "charly.check-sidecar-pod", "", tag, "")
+			if err != nil {
+				t.Fatalf("resolveDeployRefLocal: %v", err)
+			}
+			if box != boxRef {
+				t.Fatalf("box = %q, want the deploy's resolved box %q", box, boxRef)
+			}
+			want := registry + "/" + leaf + ":" + tag
+			if ref != want {
+				t.Fatalf("ref = %q, want %q — the config path must name the ref the box build produced, not the box address/leaf", ref, want)
+			}
+		})
+	}
+}

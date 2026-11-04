@@ -257,10 +257,11 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, s
 
 	volumes, bindMounts := deploykit.ResolveVolumeBacking(c.Box, c.Instance, meta.Volume, deployVolumes, meta.Home, rt.EncryptedStoragePath, rt.VolumesPath)
 
-	// resolvedOverlayImage reads the dc already in hand (R3: the SAME gate resolveDeployRefLocal
-	// consults), so the overlay comparison costs no second resolve.
-	imageRef = qualifyImageRef(imageRef, meta.Registry, c.ExplicitRef,
-		resolvedOverlayImage(dc, c.Box, c.Instance), deployBoxName, c.Tag)
+	// imageRef is ALREADY the ref this deploy resolves to: resolveDeployRefLocal applies the
+	// box→image naming rule (box registry → namespace defaults.registry → the box LEAF) BEFORE
+	// ensure-image/ExtractMetadata run. Qualifying it again here from the IMAGE's OCI label would
+	// be a second naming rule applied after the existence check — the shape that produced
+	// `image not found in local storage: charly.check-k8s-deploy-app:<tag>` (#44).
 
 	// Reconcile every named volume's ROOT ownership to the deploy's runtime user (volume_root.go). A
 	// volume first populated from an image whose directory was root-owned keeps that root ownership
