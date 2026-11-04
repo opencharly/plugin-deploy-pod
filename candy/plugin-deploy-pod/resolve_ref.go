@@ -22,10 +22,13 @@ import (
 //     "deploy-plugins-connect" seam's project dir (the SAME plugin-side loader path
 //     candy/plugin-deploy's resolveTreeViaLoader uses), and
 //   - kit.ResolveShellImageRef / kit.LocalImageExists (pure).
-// Byte-for-byte the former host resolvers' two-tier semantics: per-host Image (DeployKey then bare
-// key) → project Deploy[box].Image → the key itself; and the add_candy-overlay resolved_image
-// preference over the base-name resolution (DeployKey then bare key), gated on the overlay image
-// actually existing locally.
+//
+// The BOX NAME follows the former host resolvers' two-tier semantics: per-host Image (DeployKey
+// then bare key) → project Deploy[box].Image → the key itself. The IMAGE REF is composed from that
+// box by the ONE build-path rule (resolveDeployImageRef): box registry → namespace
+// defaults.registry → box LEAF, so a namespace-qualified box ADDRESS is never handed to the engine
+// as an image repo. The add_candy-overlay resolved_image preference still wins over the base-name
+// resolution (DeployKey then bare key), gated on the overlay image actually existing locally.
 
 const deployPluginsConnectKind = "deploy-plugins-connect"
 
@@ -40,7 +43,8 @@ func resolveDeployRefLocal(ctx context.Context, ex *sdk.Executor, box, instance,
 	if err != nil {
 		return "", "", err
 	}
-	deployBoxName = resolveDeployBoxNameLocal(ctx, ex, dc, box, instance)
+	deployKey := spec.DeployKey(box, instance)
+	deployBoxName, _ = resolveDeployBoxNameForKey(ctx, ex, dc, deployKey)
 	if ov := resolvedOverlayImage(dc, box, instance); ov != "" {
 		rt, rtErr := kit.ResolveRuntime()
 		if rtErr != nil {
@@ -54,16 +58,64 @@ func resolveDeployRefLocal(ctx context.Context, ex *sdk.Executor, box, instance,
 			return deployBoxName, ov, nil
 		}
 	}
-	return deployBoxName, kit.ResolveShellImageRef("", deployBoxName, tag), nil
+	return deployBoxName, resolveDeployImageRef(ctx, ex, deployKey, deployBoxName, tag), nil
 }
 
-// resolveDeployBoxNameLocal mirrors the former host box-name resolver: the deploy entry's declared
-// box (per-host then project), falling back to the key itself (the key==image convention).
-func resolveDeployBoxNameLocal(ctx context.Context, ex *sdk.Executor, dc *deploykit.DeployConfig, box, instance string) string {
-	if img := deployKeyToBoxLocal(ctx, ex, dc, box, instance); img != "" {
-		return img
+// resolveBaseBoxName returns the BASE BOX NAME a pod lifecycle op must build/deploy from. It is the
+// ONE implementation of "a deploy KEY is never a box name" (R2): podPrepareVenue and podRebuild
+// call it instead of spelling the image/deploy-name fallback themselves.
+//
+// An explicit image (the host resolved the deploy entry itself) wins untouched. Otherwise the
+// deploy KEY is resolved through the deploy-key→box rule (resolveDeployBoxNameForKey). Handing the
+// raw key to the build pipeline is what produced `unknown box "charly/check-sidecar-pod"`
+// (opencharly/plugin-build#46).
+//
+// Only a genuinely unresolvable key falls back to the key itself (the key==image convention).
+func resolveBaseBoxName(ctx context.Context, ex *sdk.Executor, name, image, caller string) string {
+	if image != "" {
+		return image
 	}
-	return box
+	dc, err := loadDeploy(ctx, ex, caller)
+	if err != nil {
+		return name
+	}
+	if resolved, ok := resolveDeployBoxNameForKey(ctx, ex, dc, name); ok {
+		return resolved
+	}
+	return name
+}
+
+// resolveDeployBoxNameForKey resolves a deploy KEY to the BOX name its deploy entry declares,
+// trying every spelling a namespaced deploy can carry. It is the ONE "given a deploy key, which
+// box?" rule: the config ref resolution (resolveDeployRefLocal) and the lifecycle paths
+// (resolveBaseBoxName) both go through it, so no caller can hand a deploy key to the box
+// namespace.
+//
+// A deploy has TWO spellings: the KEY is `ns/name` (spec.DeployKey), while the PROJECT projection
+// keys a namespaced deploy `ns.name` (spec.UnifiedFile.Deploys). This tries, in order:
+//   - the key's base/instance pair (per-host overlay DeployKey then bare key, then the project's
+//     base entry — the pre-existing rule, unchanged);
+//   - the exact deploy key (a local instance deploy keeps its slash spelling in the project map);
+//   - the namespace-qualified form (`ns.name`), which is how the project stores a namespaced
+//     deploy — the leg a fresh `deploy add` needs, before any per-host entry exists.
+//
+// The bool reports whether an entry was found. Callers keep their OWN fallback: the config path
+// keeps the bare base name (the key==image convention), the lifecycle paths keep the key.
+func resolveDeployBoxNameForKey(ctx context.Context, ex *sdk.Executor, dc *deploykit.DeployConfig, key string) (string, bool) {
+	box, instance := spec.ParseDeployKey(key)
+	if img := deployKeyToBoxLocal(ctx, ex, dc, box, instance); img != "" {
+		return img, true
+	}
+	if instance == "" {
+		return box, false
+	}
+	if img := deployKeyToBoxLocal(ctx, ex, dc, key, ""); img != "" {
+		return img, true
+	}
+	if img := deployKeyToBoxLocal(ctx, ex, dc, box+"."+instance, ""); img != "" {
+		return img, true
+	}
+	return box, false
 }
 
 // projectConnect and loadUnifiedForBox are the two executor-backed legs of the project
@@ -120,40 +172,68 @@ func deployKeyToBoxLocal(ctx context.Context, ex *sdk.Executor, dc *deploykit.De
 	return ""
 }
 
-// qualifyImageRef applies the registry-qualification rule to the ref resolveDeployRef produced,
-// returning the ref `charly config` renders the quadlet from. It is a PURE function of the values
-// runConfig already holds — deliberately, so the rule below is unit-testable without an executor
-// (the pre-fix form computed both its operands from executor-backed calls, which is a large part
-// of why it shipped broken).
+// resolveDeployImageRef composes the image ref a pod deploy resolves to, from the BOX the deploy
+// names. It is the plugin side of the ONE box→image naming rule the host build path applies
+// (charly's resolveBoxImageRegistryName + ResolveShellImageRef): the box's OWN registry, falling
+// back to its NAMESPACE's defaults.registry, and the box LEAF.
 //
-// The rule: registry-QUALIFY a short ref, UNLESS
-//   - the operator supplied an explicit ref via the deploy entry's `image:` field (Pattern B —
-//     arbitrary deploy-key + version-pin, /charly-core:deploy "Two supported deploy patterns"):
-//     imageRef is already fully-qualified and pinning to that exact tag is the whole point; or
-//   - imageRef IS this deploy's persisted add_candy overlay: the overlay is a LOCAL-only
-//     `<deploy-name>-overlay:<hash>` tag (no registry segment, so LooksLikeFullRef cannot protect
-//     it), and prefixing the registry would throw the overlay away and deploy the BASE image.
+// A namespace-qualified box ADDRESS is not an image repo. `charly.check-k8s-deploy-app` builds as
+// `ghcr.io/opencharly/check-k8s-deploy-app:<tag>`; composing `<address>:<tag>` hands the engine a
+// ref nothing produced (measured, opencharly/plugin-deploy-pod#44 run 2026.307.2336:
+// `image not found in local storage: charly.check-k8s-deploy-app:<tag>`).
 //
-// Two invariants this rule MUST keep, BOTH of which the pre-fix form violated:
+// A FULL ref (a deploy entry's explicit `image:`, Pattern B) is not a box name and keeps the
+// pre-existing shell-resolve contract. A project that cannot be loaded degrades to the leaf-only
+// bare ref — the resolver's existing best-effort contract, and the same name the build uses with
+// no registry.
 //
-//  1. It compares REFS to REFS. The pre-fix form bound resolveDeployRef's FIRST return — the box
-//     NAME — and compared it to a ref, so the overlay test was always false and the persisted
-//     overlay was always discarded.
-//
-//  2. It QUALIFIES the ref it already has; it never RE-RESOLVES through the deploy-key API. The
-//     pre-fix form re-resolved via resolveDeployRefLocal(deployBoxName, …), and a box NAME is not
-//     a deploy KEY: that lookup reads whichever SIBLING deployment happens to be named after the
-//     shared base box, then (tag empty) resolves the base box's label family, where every sibling
-//     deployment's alias tag competes.
-//
-// Together those made every add_candy overlay pod deploy run some other deployment's image —
-// operator deploys as much as check beds.
-func qualifyImageRef(imageRef, registry, explicitRef, resolvedOverlay, boxName, tag string) string {
-	usingResolvedOverlay := imageRef != "" && imageRef == resolvedOverlay
-	if registry == "" || explicitRef != "" || usingResolvedOverlay || kit.LooksLikeFullRef(imageRef) {
-		return imageRef
+// This runs BEFORE any existence check (ensure-image / ExtractMetadata), so the ref handed to the
+// engine is the one the build produced. A post-hoc qualification sourced from the IMAGE's OCI
+// label is unreachable on this path for exactly that reason, and is deleted.
+func resolveDeployImageRef(ctx context.Context, ex *sdk.Executor, deployKey, boxRef, tag string) string {
+	if kit.LooksLikeFullRef(boxRef) {
+		return kit.ResolveShellImageRef("", boxRef, tag)
 	}
-	return kit.ResolveShellImageRef(registry, boxName, tag)
+	return kit.ResolveShellImageRef(projectBoxRegistry(ctx, ex, deployKey, boxRef), spec.LeafName(boxRef), tag)
+}
+
+// projectBoxRegistry returns the registry the BOX BUILD prefixes for boxRef: the box's own
+// `registry:`, else its NAMESPACE's `defaults.registry`, else "" (no registry). It reads the SAME
+// project the deploy-key→box rule reads, over the SAME reverse-channel loader seams
+// (projectConnect + loadUnifiedForBox), and folds the namespace tree through ProjectConfig.
+func projectBoxRegistry(ctx context.Context, ex *sdk.Executor, deployKey, boxRef string) string {
+	var pre spec.DeployPluginsConnectReply
+	if err := projectConnect(ctx, ex, deployKey, &pre); err != nil || pre.Dir == "" {
+		return ""
+	}
+	uf, ok, err := loadUnifiedForBox(ctx, ex, pre.Dir)
+	if err != nil || !ok || uf == nil {
+		return ""
+	}
+	cfg := uf.ProjectConfig()
+	if cfg == nil {
+		return ""
+	}
+	img, nsCfg, ok := cfg.ResolveBoxRef(boxRef)
+	if !ok {
+		// The project deploy map's `image:` can carry the box's LEAF (the bed declares
+		// `image: check-k8s-deploy-app` while the box lives in the `charly` namespace). A bare
+		// leaf does not resolve from the ROOT Config, so discover its namespaced address first —
+		// the same discovery the host build path uses (Config.FindBoxByLeaf).
+		if qualified, found := cfg.FindBoxByLeaf(spec.LeafName(boxRef)); found {
+			img, nsCfg, ok = cfg.ResolveBoxRef(qualified)
+		}
+	}
+	if !ok {
+		return ""
+	}
+	if img.Registry != "" {
+		return img.Registry
+	}
+	if nsCfg != nil {
+		return nsCfg.Defaults.Registry
+	}
+	return ""
 }
 
 // resolvedOverlayImage mirrors the former host resolved_image lookup: the concrete add_candy-overlay

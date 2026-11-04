@@ -293,8 +293,16 @@ func podPrepareVenue(ctx context.Context, exec *sdk.Executor, p lifecycleParams)
 			return nil, fmt.Errorf("plugin-deploy-pod prepare-venue: decode opts: %w", err)
 		}
 	}
+	// The base box name. Resolve it BEFORE the overlay build: the host's `overlay` builder takes
+	// req.Image as the base ref (falling back to req.DeployName), so a raw deploy KEY reaching it
+	// fails inside podman with `short-name "charly/check-sidecar-pod" did not resolve to an alias`.
+	// An explicit image wins untouched; otherwise the deploy KEY is resolved through the plugin's
+	// own deploy-key→box resolver, because a key is not a box name (a qualified bed is dispatched
+	// as `ns/name` while its box is the declared `image:`). The SAME resolved name is the key into
+	// the render-prepped envelope's Boxes (fetched below via the build:generate resolve call).
+	baseName := resolveBaseBoxName(ctx, exec, p.Name, p.Image, "pod prepare-venue")
 	reqJSON, err := json.Marshal(spec.OverlayBuildRequest{
-		Dir: p.Dir, DeployName: p.Name, Image: p.Image, Version: p.Version,
+		Dir: p.Dir, DeployName: p.Name, Image: baseName, Version: p.Version,
 		DryRun: opts.DryRun, AssumeYes: opts.AssumeYes, AllowRepoChanges: opts.AllowRepoChanges,
 		AllowRootTasks: opts.AllowRootTasks, WithServices: opts.WithServices,
 	})
@@ -311,13 +319,6 @@ func podPrepareVenue(ctx context.Context, exec *sdk.Executor, p lifecycleParams)
 	}
 	if reply.Error != "" {
 		return nil, fmt.Errorf("plugin-deploy-pod prepare-venue: %s", reply.Error)
-	}
-
-	// The base box name — the key into the render-prepped envelope's Boxes (fetched below via the
-	// build:generate resolve call) — is the SAME base the host prep used (req.Image / req.DeployName).
-	baseName := p.Image
-	if baseName == "" {
-		baseName = p.Name
 	}
 
 	// Base-image metadata (User/Security/Registry) — read PLUGIN-SIDE (K3-W2): the host prep only
@@ -527,14 +528,14 @@ func podRebuild(ctx context.Context, exec *sdk.Executor, p lifecycleParams) (*pb
 			return nil, fmt.Errorf("plugin-deploy-pod rebuild: decode opts: %w", err)
 		}
 	}
-	baseRef := p.Image
-	if baseRef == "" {
-		baseRef = p.Name
-	}
 	if ropts.DryRun {
 		return marshalReply(struct{}{}) // dry-run: the host proxy prints nothing for Rebuild
 	}
 	if ropts.RebuildImage {
+		// Same resolution rule as podPrepareVenue: `box build`/`check box` take a BOX name, and the
+		// lifecycle params carry the deploy KEY (a qualified bed's key is `ns/name`), never the key
+		// verbatim — opencharly/plugin-build#46.
+		baseRef := resolveBaseBoxName(ctx, exec, p.Name, p.Image, "pod rebuild")
 		if _, err := podCli(ctx, exec, false, false, "box", "build", baseRef); err != nil {
 			return nil, err
 		}

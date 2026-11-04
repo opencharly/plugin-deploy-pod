@@ -131,7 +131,12 @@ func resolveDeployRef(ctx context.Context, ex *sdk.Executor, c *spec.PodConfigSe
 // LoadDeployConfigForRead(caller) swallow): a load error degrades to (nil, nil) + a stderr warning,
 // so a config setup that finds no overlay proceeds with image-label-driven behavior (the same
 // graceful degradation the host leg made).
-func loadDeploy(ctx context.Context, ex *sdk.Executor, caller string) (*deploykit.DeployConfig, error) {
+//
+// It is a package var (not a plain func) for the SAME reason saveDeploy / mutateDeploy /
+// projectConnect are: a unit test with no reverse-channel executor must be able to stub the
+// per-host read instead of driving loaderkit against the operator's real ~/.config/charly, which
+// cannot succeed and would print the degradation warning into the test output.
+var loadDeploy = func(ctx context.Context, ex *sdk.Executor, caller string) (*deploykit.DeployConfig, error) {
 	dc, err := loaderkit.LoadHostDeployConfigViaExecutor(ctx, ex)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: %s: charly.yml unavailable for read: %v\n", caller, err)
@@ -252,10 +257,11 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, s
 
 	volumes, bindMounts := deploykit.ResolveVolumeBacking(c.Box, c.Instance, meta.Volume, deployVolumes, meta.Home, rt.EncryptedStoragePath, rt.VolumesPath)
 
-	// resolvedOverlayImage reads the dc already in hand (R3: the SAME gate resolveDeployRefLocal
-	// consults), so the overlay comparison costs no second resolve.
-	imageRef = qualifyImageRef(imageRef, meta.Registry, c.ExplicitRef,
-		resolvedOverlayImage(dc, c.Box, c.Instance), deployBoxName, c.Tag)
+	// imageRef is ALREADY the ref this deploy resolves to: resolveDeployRefLocal applies the
+	// box→image naming rule (box registry → namespace defaults.registry → the box LEAF) BEFORE
+	// ensure-image/ExtractMetadata run. Qualifying it again here from the IMAGE's OCI label would
+	// be a second naming rule applied after the existence check — the shape that produced
+	// `image not found in local storage: charly.check-k8s-deploy-app:<tag>` (#44).
 
 	// Reconcile every named volume's ROOT ownership to the deploy's runtime user (volume_root.go). A
 	// volume first populated from an image whose directory was root-owned keeps that root ownership
