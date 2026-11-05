@@ -29,6 +29,20 @@ func resolvePodStartPlan(ctx context.Context, ex *sdk.Executor, box, instance st
 	if err != nil {
 		return nil, err
 	}
+	// The mode this deploy starts under is the SELECTED engine's, not the host-wide
+	// engine.run's. Resolve the selection BEFORE the mode switch; otherwise a
+	// `pod:` + `engine: containerd` deploy on a podman-default host is started through the
+	// quadlet branch and fails "not configured" (or, worse, starts a unit for the wrong
+	// engine). The branch bodies resolve the selection again against the effective rt.
+	dc, err := loadDeploy(ctx, ex, "charly start")
+	if err != nil {
+		return nil, err
+	}
+	sel, err := resolvePodSelectionFromConfig(dc, box, instance, rt)
+	if err != nil {
+		return nil, err
+	}
+	rt = runtimeForSelection(rt, sel)
 	switch rt.RunMode {
 	case "quadlet":
 		return resolvePodStartQuadlet(ctx, ex, box, instance, rt)
@@ -171,7 +185,7 @@ func resolvePodRuntimeImageWith(ctx context.Context, ex *sdk.Executor, box, inst
 	if err != nil {
 		return nil, err
 	}
-	if err := ensureImagePresent(ctx, ex, imageRef, sel.Target); err != nil {
+	if err := ensureImagePresent(ctx, ex, imageRef, sel.Target, box); err != nil {
 		return nil, err
 	}
 	metaPtr, err := deploykit.ExtractMetadata(string(sel.Engine), imageRef)

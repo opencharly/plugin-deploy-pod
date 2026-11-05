@@ -6,6 +6,7 @@ import (
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/deploykit"
 	"github.com/opencharly/sdk/kit"
+	"github.com/opencharly/spec/container"
 	"github.com/opencharly/spec/spec"
 )
 
@@ -79,4 +80,33 @@ func resolvePodSelectionFor(ctx context.Context, ex *sdk.Executor, box, instance
 		return podSelection{}, err
 	}
 	return resolvePodSelectionFromConfig(dc, box, instance, rt)
+}
+
+// detectRunMode is the host-availability half of runtimeForSelection. It is a package var so a
+// unit test can pin the capability-table answer without depending on the runner's systemd-user
+// session; production reads the ONE host probe in spec/hostenv.
+var detectRunMode = kit.DetectRunMode
+
+// runtimeForSelection returns rt with the persistence/supervision MODE re-derived from the
+// deploy's resolved engine. rt.RunMode was resolved for rt.RunEngine (the host-wide engine.run:
+// env > settings > detection); a deploy-level `engine:` overrides that WORD, and the mode is a
+// capability FACT of the selected word — containerd persists as a `systemd-unit`, podman as a
+// quadlet, docker direct. Keeping the global mode emits a podman quadlet for a containerd deploy
+// and `charly start` then runs podman (opencharly/charly#1109).
+//
+// `direct` is engine-agnostic (the engine CLI is executed with no unit), so an explicit or
+// host-degraded direct mode is preserved. A unit mode is re-derived through the same
+// capability+availability rule ResolveRuntime uses, so a host without a systemd-user session
+// still degrades to direct. An unchanged engine, a nil rt, or an unresolved selection is a
+// no-op.
+func runtimeForSelection(rt *kit.ResolvedRuntime, sel podSelection) *kit.ResolvedRuntime {
+	if rt == nil || sel.Engine == "" || string(sel.Engine) == rt.RunEngine {
+		return rt
+	}
+	out := *rt
+	out.RunEngine = string(sel.Engine)
+	if container.IsUnitRunMode(out.RunMode) {
+		out.RunMode = detectRunMode(string(sel.Engine))
+	}
+	return &out
 }

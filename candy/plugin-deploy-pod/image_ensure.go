@@ -86,7 +86,7 @@ func newImageStore(ex *sdk.Executor, target deploykit.ContainerdTarget) (deployk
 // store itself (no host round-trip): (1) the target store already addresses it, (2) otherwise
 // build:ensure (W3.6) stages it — pulling from the registry or building locally — and the store
 // is re-probed to prove the boundary.
-func ensureImagePresent(ctx context.Context, ex *sdk.Executor, imageRef string, target deploykit.ContainerdTarget) error {
+func ensureImagePresent(ctx context.Context, ex *sdk.Executor, imageRef string, target deploykit.ContainerdTarget, box string) error {
 	store, err := newImageStore(ex, target)
 	if err != nil {
 		return err
@@ -106,8 +106,15 @@ func ensureImagePresent(ctx context.Context, ex *sdk.Executor, imageRef string, 
 		return nil
 	}
 	// Step 4 — build:ensure. It receives the SAME resolved engine word, so the image lands in
-	// the store just probed.
-	if err := dispatchBuildEnsurePeer(ctx, ex, imageRef, string(target.Engine)); err != nil {
+	// the store just probed, AND the project dir: a bed's image is built LOCALLY under the
+	// project's registry/name, so with no dir build:ensure cannot rebuild it into the target
+	// store and fails "buildkitdrive: build: no context" (measured: a disposable pod bed whose
+	// image is not registry-published cannot reach a containerd store without this).
+	dir, derr := projectDirFor(ctx, ex, box)
+	if derr != nil {
+		return fmt.Errorf("%w: %s: resolving project dir for the build fallback: %v", spec.ErrImageNotLocal, imageRef, derr)
+	}
+	if err := dispatchBuildEnsurePeer(ctx, ex, imageRef, string(target.Engine), dir); err != nil {
 		return fmt.Errorf("%w: %s: %v", spec.ErrImageNotLocal, imageRef, err)
 	}
 	present, err = store.Has(ctx, imageRef)
@@ -126,10 +133,11 @@ func ensureImagePresent(ctx context.Context, ex *sdk.Executor, imageRef string, 
 // generic Executor.InvokeProvider peer-dispatch leg instead (class-agnostic — "build"/"ensure" is
 // treated identically to any other (class, word) pair). The request carries the SAME run engine
 // the pod will launch on, so the image lands in the store that runs it.
-func dispatchBuildEnsurePeer(ctx context.Context, ex *sdk.Executor, imageRef, runEngine string) error {
+func dispatchBuildEnsurePeer(ctx context.Context, ex *sdk.Executor, imageRef, runEngine, dir string) error {
 	params, err := json.Marshal(spec.BuildEnsureRequest{
 		Image:     imageRef,
 		RunEngine: runEngine,
+		Dir:       dir,
 	})
 	if err != nil {
 		return err

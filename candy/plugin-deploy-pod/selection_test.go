@@ -130,6 +130,7 @@ type recordExecutorClient struct {
 	scripts []string
 	handle  func(script string) *pb.CaptureReply
 	invoked []string
+	params  [][]byte
 }
 
 func (c *recordExecutorClient) RunCapture(_ context.Context, in *pb.RunRequest, _ ...grpc.CallOption) (*pb.CaptureReply, error) {
@@ -139,6 +140,7 @@ func (c *recordExecutorClient) RunCapture(_ context.Context, in *pb.RunRequest, 
 
 func (c *recordExecutorClient) InvokeProvider(_ context.Context, in *pb.InvokeProviderRequest, _ ...grpc.CallOption) (*pb.InvokeReply, error) {
 	c.invoked = append(c.invoked, in.GetClass()+":"+in.GetReserved())
+	c.params = append(c.params, in.GetParamsJson())
 	return &pb.InvokeReply{}, nil
 }
 
@@ -153,7 +155,7 @@ func TestEnsureImagePresent_ProbesResolvedStore(t *testing.T) {
 		client := &recordExecutorClient{handle: func(string) *pb.CaptureReply {
 			return &pb.CaptureReply{ExitCode: 0}
 		}}
-		if err := ensureImagePresent(t.Context(), sdk.NewInProcExecutor(client), "myimage:latest", sel.Target); err != nil {
+		if err := ensureImagePresent(t.Context(), sdk.NewInProcExecutor(client), "myimage:latest", sel.Target, "myimage"); err != nil {
 			t.Fatalf("ensureImagePresent: %v", err)
 		}
 		if len(client.scripts) != 1 {
@@ -166,6 +168,16 @@ func TestEnsureImagePresent_ProbesResolvedStore(t *testing.T) {
 	})
 
 	t.Run("absent reaches build:ensure and re-probes", func(t *testing.T) {
+		// build:ensure now carries the project dir (a locally-built bed image cannot be
+		// staged into a containerd store without it). Stub the host preamble seam so this
+		// in-proc test does not need a live host builder.
+		prevProjectConnect := projectConnect
+		projectConnect = func(_ context.Context, _ *sdk.Executor, _ string, pre *spec.DeployPluginsConnectReply) error {
+			pre.Dir = "/project"
+			return nil
+		}
+		t.Cleanup(func() { projectConnect = prevProjectConnect })
+
 		probes := 0
 		client := &recordExecutorClient{handle: func(script string) *pb.CaptureReply {
 			if strings.Contains(script, "image inspect") {
@@ -181,7 +193,7 @@ func TestEnsureImagePresent_ProbesResolvedStore(t *testing.T) {
 			// The engine's own daemon probe (`info`) answers, so exit 1 means absent.
 			return &pb.CaptureReply{ExitCode: 0}
 		}}
-		if err := ensureImagePresent(t.Context(), sdk.NewInProcExecutor(client), "myimage:latest", sel.Target); err != nil {
+		if err := ensureImagePresent(t.Context(), sdk.NewInProcExecutor(client), "myimage:latest", sel.Target, "myimage"); err != nil {
 			t.Fatalf("ensureImagePresent: %v", err)
 		}
 		if len(client.invoked) != 1 || client.invoked[0] != "build:ensure" {
@@ -196,4 +208,82 @@ func TestEnsureImagePresent_ProbesResolvedStore(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestRuntimeForSelection_DerivesModeFromDeployEngine is the regression witness for
+// opencharly/charly#1109's config/start half: the persistence mode is a capability FACT of
+// the SELECTED engine. The host-wide rt.RunMode is auto-detected for rt.RunEngine (podman
+// → quadlet on a podman-default host), so a deploy-level `engine: containerd` kept running
+// the quadlet path and emitted `ExecStart=/usr/bin/podman run`. The test stubs the host probe
+// so the capability-table answer is pinned without depending on the runner's systemd session.
+func TestRuntimeForSelection_DerivesModeFromDeployEngine(t *testing.T) {
+	prev := detectRunMode
+	t.Cleanup(func() { detectRunMode = prev })
+
+	var probed []string
+	detectRunMode = func(engine string) string {
+		probed = append(probed, engine)
+		if engine == "containerd" {
+			return "systemd-unit"
+		}
+		return "quadlet"
+	}
+
+	rt := &kit.ResolvedRuntime{RunEngine: "podman", RunMode: "quadlet"}
+	sel, err := resolvePodSelection(deploykit.Selection{Engine: "containerd"}, rt)
+	if err != nil {
+		t.Fatalf("resolvePodSelection: %v", err)
+	}
+	if sel.Engine != "containerd" {
+		t.Fatalf("selection engine = %q, want containerd", sel.Engine)
+	}
+
+	got := runtimeForSelection(rt, sel)
+	if got == rt {
+		t.Fatal("runtimeForSelection returned the global runtime unchanged; the containerd deploy would emit a podman quadlet")
+	}
+	if got.RunMode != "systemd-unit" {
+		t.Fatalf("effective RunMode = %q, want systemd-unit (containerd's capability mode)", got.RunMode)
+	}
+	if got.RunEngine != "containerd" {
+		t.Fatalf("effective RunEngine = %q, want containerd", got.RunEngine)
+	}
+	if len(probed) != 1 || probed[0] != "containerd" {
+		t.Fatalf("host run-mode probe = %v, want exactly [containerd]", probed)
+	}
+	// Negative control: the input runtime is a value copy, never mutated.
+	if rt.RunMode != "quadlet" || rt.RunEngine != "podman" {
+		t.Fatalf("runtimeForSelection mutated its input: %+v", rt)
+	}
+}
+
+// TestRuntimeForSelection_PreservesDirect: direct is engine-agnostic (the engine CLI is
+// executed with no unit), so an explicit or host-degraded direct mode survives a deploy-level
+// engine change; only a unit mode is re-derived.
+func TestRuntimeForSelection_PreservesDirect(t *testing.T) {
+	rt := &kit.ResolvedRuntime{RunEngine: "podman", RunMode: "direct"}
+	sel, err := resolvePodSelection(deploykit.Selection{Engine: "containerd"}, rt)
+	if err != nil {
+		t.Fatalf("resolvePodSelection: %v", err)
+	}
+	got := runtimeForSelection(rt, sel)
+	if got.RunMode != "direct" {
+		t.Fatalf("effective RunMode = %q, want direct preserved", got.RunMode)
+	}
+	if got.RunEngine != "containerd" {
+		t.Fatalf("effective RunEngine = %q, want containerd", got.RunEngine)
+	}
+}
+
+// TestRuntimeForSelection_SameEngineIsNoOp: an unchanged engine returns the SAME runtime, so
+// the existing explicit/host-degraded mode behaviour is untouched.
+func TestRuntimeForSelection_SameEngineIsNoOp(t *testing.T) {
+	rt := &kit.ResolvedRuntime{RunEngine: "containerd", RunMode: "systemd-unit"}
+	sel, err := resolvePodSelection(deploykit.Selection{}, rt)
+	if err != nil {
+		t.Fatalf("resolvePodSelection: %v", err)
+	}
+	if got := runtimeForSelection(rt, sel); got != rt {
+		t.Fatalf("runtimeForSelection rebuilt the runtime for the same engine: %+v", got)
+	}
 }

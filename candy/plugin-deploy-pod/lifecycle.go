@@ -38,6 +38,11 @@ type lifecycleParams struct {
 	EngineBin string          `json:"engine_bin"` // host-resolved container engine binary (PostTeardown)
 	Cmd       []string        `json:"cmd"`
 	Plan      json.RawMessage `json:"plan"` // host-resolved spec.PodLifecyclePlan (OpStart/OpStop) — the K4 deep-body move
+	// Node is the dispatch-merged DeployNode the fleet target marshals as `node`
+	// (plugin-fleet/deploy_target.go marshalDeployOpParams). PrepareVenue reads its authored
+	// `engine:` selector into the persisted state patch so config/start resolve the engine the
+	// deploy was ADDED with (opencharly/charly#1109); the other lifecycle ops ignore it.
+	Node *spec.Deploy `json:"node,omitempty"`
 }
 
 // isLifecycleOp reports whether op is a substrate-lifecycle Op (vs. the OpExecute deploy walk).
@@ -413,15 +418,26 @@ func podPrepareVenue(ctx context.Context, exec *sdk.Executor, p lifecycleParams)
 			"Overlay image ready: " + resolvedImage,
 			"To start the container, run: charly start " + reply.DeployName,
 		}
-		r.State = prepareVenueState(resolvedImage, reply.BaseImage)
+		r.State = prepareVenueState(resolvedImage, reply.BaseImage, baseName, p.Node)
 	}
 	return marshalReply(r)
 }
 
 // prepareVenueState encodes the deploy-state delta a PrepareVenue reply carries back for the host
-// to persist: the concrete add_candy overlay ref, and ONLY when an overlay was actually built
-// (resolvedImage differs from the base). Returns nil otherwise, so a no-overlay deploy writes
-// nothing.
+// to persist:
+//
+//   - the concrete add_candy overlay ref, ONLY when an overlay was actually built
+//     (resolvedImage differs from the base);
+//   - the deploy node's authored `engine:` selector, whenever the node selected one; when it
+//     is present, the deploy's box/image name and the `pod` target ride along so a newly
+//     created entry is a complete image-backed pod entry.
+//
+// Returns nil when there is neither an overlay nor a selector. The engine write is deliberately
+// NOT gated on the overlay: a plain `pod:` deploy with `engine: containerd` must still remember
+// its engine (opencharly/charly#1109). Carrying box + target alongside it is what keeps the
+// entry valid when an older sdk/plugin-fleet (which does not yet know `engine`) decodes this
+// patch: the entry is still a complete pod entry, and only the new field is dropped until those
+// consumers adopt it.
 //
 // It marshals the TYPED spec.SaveDeployStateInput. That is the whole point of the helper, and it
 // is not stylistic: the host decodes this blob into that struct, whose wire key is the
@@ -432,12 +448,33 @@ func podPrepareVenue(ctx context.Context, exec *sdk.Executor, p lifecycleParams)
 // image ready", the write path still took its lock (leaving a charly.yml.lock next to a charly.yml
 // that was never created), and the next `charly config` then resolved the deploy to the BASE image
 // and rendered a quadlet running it — every add_candy overlay pod deploy silently ran the wrong
-// image. Marshal the wire struct, never a key map.
-func prepareVenueState(resolvedImage, baseImage string) json.RawMessage {
-	if resolvedImage == "" || resolvedImage == baseImage {
+// image. Marshal the wire struct, never a key map. The `engine` field rides the same contract and
+// would be dropped by the same mistake.
+func prepareVenueState(resolvedImage, baseImage, box string, node *spec.Deploy) json.RawMessage {
+	var in spec.SaveDeployStateInput
+	if resolvedImage != "" && resolvedImage != baseImage {
+		in.ResolvedImage = resolvedImage
+	}
+	if node != nil {
+		in.Engine = node.Engine
+	}
+	if in.ResolvedImage == "" && in.Engine == "" {
+		// Preserve the pre-existing no-overlay, no-selector contract: nothing to persist.
 		return nil
 	}
-	state, err := json.Marshal(spec.SaveDeployStateInput{ResolvedImage: resolvedImage})
+	if in.Engine != "" {
+		// An engine selector can arrive with NO overlay, so give the new entry the image that
+		// makes it a complete image-backed pod entry. The node-form writer derives the `pod:`
+		// discriminator from Target or an image/workload indicator; an engine-only patch has
+		// neither, so without this the writer would emit a targetless `group:` entry and the
+		// next load would reject `engine` there (spec/deploy_nodeform.go deployDiscForEntity).
+		// An older sdk/plugin-fleet drops only the `engine` key and still writes a valid entry.
+		// applyDeployState seeds Image/Target only when the entry has none, so an existing
+		// operator value is never rewritten.
+		in.Box = box
+		in.Target = "pod"
+	}
+	state, err := json.Marshal(in)
 	if err != nil {
 		return nil
 	}

@@ -113,6 +113,10 @@ func runPodConfigSetup(ctx context.Context, ex *sdk.Executor, c *spec.PodConfigS
 	if err != nil {
 		return err
 	}
+	// The deploy's own engine: overrides the host-wide engine.run, so the emitted persistence
+	// mode must be THAT engine's (containerd → systemd-unit), never the mode auto-detected for
+	// a different global engine (opencharly/charly#1109).
+	rt = runtimeForSelection(rt, sel)
 	if rootfulUnsupported(sel.Target, rt.RunMode) {
 		return rootfulRefusal(sel.Engine, rt.RunMode)
 	}
@@ -202,7 +206,7 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, s
 	if err != nil {
 		return err
 	}
-	if err := ensureImagePresent(ctx, ex, imageRef, sel.Target); err != nil {
+	if err := ensureImagePresent(ctx, ex, imageRef, sel.Target, c.Box); err != nil {
 		return err
 	}
 	// ExtractMetadata PLUGIN-SIDE (#55 coneC-dsh — the pod-config-ensure-image host seam shrinks to
