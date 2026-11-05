@@ -47,6 +47,9 @@ func runPodConfigRemove(ctx context.Context, ex *sdk.Executor, c *spec.PodConfig
 	if err != nil {
 		return err
 	}
+	// Disable the unit the SELECTED engine actually emitted, not the mode auto-detected for the
+	// host-wide engine.run (opencharly/charly#1109's config/start pair shares this resolution).
+	rt = runtimeForSelection(rt, sel)
 
 	if rt.RunMode == "direct" || IsDirectDeploy(boxName, c.Instance) {
 		name := kit.ContainerNameInstance(boxName, c.Instance)

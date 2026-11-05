@@ -113,6 +113,10 @@ func runPodConfigSetup(ctx context.Context, ex *sdk.Executor, c *spec.PodConfigS
 	if err != nil {
 		return err
 	}
+	// The deploy's own engine: overrides the host-wide engine.run, so the emitted persistence
+	// mode must be THAT engine's (containerd → systemd-unit), never the mode auto-detected for
+	// a different global engine (opencharly/charly#1109).
+	rt = runtimeForSelection(rt, sel)
 	if rootfulUnsupported(sel.Target, rt.RunMode) {
 		return rootfulRefusal(sel.Engine, rt.RunMode)
 	}
