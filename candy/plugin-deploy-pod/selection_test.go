@@ -130,6 +130,7 @@ type recordExecutorClient struct {
 	scripts []string
 	handle  func(script string) *pb.CaptureReply
 	invoked []string
+	params  [][]byte
 }
 
 func (c *recordExecutorClient) RunCapture(_ context.Context, in *pb.RunRequest, _ ...grpc.CallOption) (*pb.CaptureReply, error) {
@@ -139,6 +140,7 @@ func (c *recordExecutorClient) RunCapture(_ context.Context, in *pb.RunRequest, 
 
 func (c *recordExecutorClient) InvokeProvider(_ context.Context, in *pb.InvokeProviderRequest, _ ...grpc.CallOption) (*pb.InvokeReply, error) {
 	c.invoked = append(c.invoked, in.GetClass()+":"+in.GetReserved())
+	c.params = append(c.params, in.GetParamsJson())
 	return &pb.InvokeReply{}, nil
 }
 
@@ -153,7 +155,7 @@ func TestEnsureImagePresent_ProbesResolvedStore(t *testing.T) {
 		client := &recordExecutorClient{handle: func(string) *pb.CaptureReply {
 			return &pb.CaptureReply{ExitCode: 0}
 		}}
-		if err := ensureImagePresent(t.Context(), sdk.NewInProcExecutor(client), "myimage:latest", sel.Target); err != nil {
+		if err := ensureImagePresent(t.Context(), sdk.NewInProcExecutor(client), "myimage:latest", sel.Target, "myimage"); err != nil {
 			t.Fatalf("ensureImagePresent: %v", err)
 		}
 		if len(client.scripts) != 1 {
@@ -166,6 +168,16 @@ func TestEnsureImagePresent_ProbesResolvedStore(t *testing.T) {
 	})
 
 	t.Run("absent reaches build:ensure and re-probes", func(t *testing.T) {
+		// build:ensure now carries the project dir (a locally-built bed image cannot be
+		// staged into a containerd store without it). Stub the host preamble seam so this
+		// in-proc test does not need a live host builder.
+		prevProjectConnect := projectConnect
+		projectConnect = func(_ context.Context, _ *sdk.Executor, _ string, pre *spec.DeployPluginsConnectReply) error {
+			pre.Dir = "/project"
+			return nil
+		}
+		t.Cleanup(func() { projectConnect = prevProjectConnect })
+
 		probes := 0
 		client := &recordExecutorClient{handle: func(script string) *pb.CaptureReply {
 			if strings.Contains(script, "image inspect") {
@@ -181,7 +193,7 @@ func TestEnsureImagePresent_ProbesResolvedStore(t *testing.T) {
 			// The engine's own daemon probe (`info`) answers, so exit 1 means absent.
 			return &pb.CaptureReply{ExitCode: 0}
 		}}
-		if err := ensureImagePresent(t.Context(), sdk.NewInProcExecutor(client), "myimage:latest", sel.Target); err != nil {
+		if err := ensureImagePresent(t.Context(), sdk.NewInProcExecutor(client), "myimage:latest", sel.Target, "myimage"); err != nil {
 			t.Fatalf("ensureImagePresent: %v", err)
 		}
 		if len(client.invoked) != 1 || client.invoked[0] != "build:ensure" {

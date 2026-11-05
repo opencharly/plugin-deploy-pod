@@ -206,7 +206,7 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, s
 	if err != nil {
 		return err
 	}
-	if err := ensureImagePresent(ctx, ex, imageRef, sel.Target); err != nil {
+	if err := ensureImagePresent(ctx, ex, imageRef, sel.Target, c.Box); err != nil {
 		return err
 	}
 	// ExtractMetadata PLUGIN-SIDE (#55 coneC-dsh — the pod-config-ensure-image host seam shrinks to

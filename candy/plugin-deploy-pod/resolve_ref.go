@@ -129,6 +129,18 @@ var (
 	loadUnifiedForBox = loaderkit.LoadUnifiedViaExecutor
 )
 
+// projectDirFor resolves the project dir through the SAME "deploy-plugins-connect" preamble
+// resolveDeployBoxNameLocal uses. build:ensure needs it to rebuild a project/box image into
+// the deploy's RUN-engine store when a registry pull misses — a bed's locally-built image is
+// never registry-published, so without the dir that fallback fails "build: no context".
+func projectDirFor(ctx context.Context, ex *sdk.Executor, box string) (string, error) {
+	var pre spec.DeployPluginsConnectReply
+	if err := projectConnect(ctx, ex, box, &pre); err != nil {
+		return "", err
+	}
+	return pre.Dir, nil
+}
+
 // deployKeyToBoxLocal mirrors the former host deploy-key→box loader-read: user (per-host) overlay
 // wins over the project config; each is tried DeployKey-then-bare-key.
 func deployKeyToBoxLocal(ctx context.Context, ex *sdk.Executor, dc *deploykit.DeployConfig, box, instance string) string {

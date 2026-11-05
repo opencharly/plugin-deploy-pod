@@ -596,7 +596,7 @@ func provisionData(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntim
 				dataRef = resolved
 			}
 		}
-		if err := ensureImagePresent(ctx, ex, dataRef, sel.Target); err != nil {
+		if err := ensureImagePresent(ctx, ex, dataRef, sel.Target, c.Box); err != nil {
 			return fmt.Errorf("extracting metadata from data image %s: %w", dataRef, err)
 		}
 		dm, err := deploykit.ExtractMetadata(dataEngine, dataRef)
@@ -707,7 +707,7 @@ func updateAllDeployedQuadlets(ctx context.Context, ex *sdk.Executor, rt *kit.Re
 			fmt.Fprintf(os.Stderr, "Warning: could not resolve the engine for %s, skipping quadlet update: %v\n", key, selErr)
 			continue
 		}
-		if err := ensureImagePresent(ctx, ex, imageRef, updateSel.Target); err != nil {
+		if err := ensureImagePresent(ctx, ex, imageRef, updateSel.Target, boxName); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not read metadata for %s, skipping quadlet update\n", key)
 			continue
 		}
