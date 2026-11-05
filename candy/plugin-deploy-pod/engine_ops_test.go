@@ -283,9 +283,12 @@ func TestResolvePodStartSystemdUnit_StartsViaSystemctl(t *testing.T) {
 	}
 
 	rt := kitResolvedRuntimeForTest("containerd", "systemd-unit", "auto")
-	plan, err := resolvePodStartSystemdUnit(context.Background(), nil, "demo", "", rt)
+	plan, sel, err := resolvePodStartSystemdUnit(context.Background(), nil, "demo", "", rt)
 	if err != nil {
 		t.Fatalf("resolvePodStartSystemdUnit: %v", err)
+	}
+	if sel.Engine != "containerd" {
+		t.Fatalf("resolved selection: got engine %q, want containerd", sel.Engine)
 	}
 	if plan.Mode != "systemd-unit" || plan.DirectDeploy {
 		t.Fatalf("plan mode: got %q directDeploy=%v, want systemd-unit/false", plan.Mode, plan.DirectDeploy)

@@ -120,6 +120,12 @@ func runPodConfigSetup(ctx context.Context, ex *sdk.Executor, c *spec.PodConfigS
 	if rootfulUnsupported(sel.Target, rt.RunMode) {
 		return rootfulRefusal(sel.Engine, rt.RunMode)
 	}
+	// The launch argv this config step is about to emit names a runtime handler. Refuse HERE,
+	// before any file is written or any image work runs, when the venue cannot launch it: the
+	// emitted unit would restart-loop and hold the container name (plugin-containerd#16).
+	if err := ensureVenueRuntimeHandler(sel.Engine); err != nil {
+		return err
+	}
 	return runConfig(ctx, ex, rt, sel, c)
 }
 

@@ -523,6 +523,11 @@ func runConfigDirect(rt *kit.ResolvedRuntime, sel podSelection, qcfg deploykit.Q
 	if rootfulUnsupported(sel.Target, rt.RunMode) {
 		return rootfulRefusal(sel.Engine, rt.RunMode)
 	}
+	// The direct launch argv names a runtime handler; refuse one this venue cannot launch
+	// before anything is stopped or removed (plugin-containerd#16).
+	if err := ensureVenueRuntimeHandler(sel.Engine); err != nil {
+		return err
+	}
 	engine := string(sel.Engine)
 	name := kit.ContainerNameInstance(qcfg.BoxName, qcfg.Instance)
 	stop := engineStopArgv(sel.Target, name)
@@ -536,6 +541,10 @@ func runConfigDirect(rt *kit.ResolvedRuntime, sel podSelection, qcfg deploykit.Q
 	cmd := exec.Command(args[0], args[1:]...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		// The engine creates the container before it starts the task, so a failed launch may
+		// leave it CREATED with its name held. Remove it with the SAME argv used above, so a
+		// retry is not blocked by `name ... already used` (plugin-containerd#16).
+		_ = exec.Command(rm[0], rm[1:]...).Run()
 		return fmt.Errorf("%s run %s failed: %w\n%s", engine, name, err, strings.TrimSpace(string(out)))
 	}
 	cid := strings.TrimSpace(string(out))
