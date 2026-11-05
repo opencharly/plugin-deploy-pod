@@ -127,7 +127,7 @@ func podStart(ctx context.Context, exec *sdk.Executor, p lifecycleParams) (*pb.I
 		return nil, fmt.Errorf("plugin-deploy-pod start: decode opts: %w", err)
 	}
 	box, instance := spec.ParseDeployKey(p.Name)
-	planPtr, err := resolvePodStartPlan(ctx, exec, box, instance, opts)
+	planPtr, sel, err := resolvePodStartPlan(ctx, exec, box, instance, opts)
 	if err != nil {
 		return nil, fmt.Errorf("plugin-deploy-pod start: resolve plan: %w", err)
 	}
@@ -137,7 +137,7 @@ func podStart(ctx context.Context, exec *sdk.Executor, p lifecycleParams) (*pb.I
 			return nil, fmt.Errorf("plugin-deploy-pod start: mount encrypted volumes: %w", err)
 		}
 	}
-	if err := podContainerStart(ctx, exec, plan); err != nil {
+	if err := podContainerStart(ctx, exec, plan, sel); err != nil {
 		return nil, err
 	}
 	if plan.Tunnel != nil {
@@ -221,22 +221,51 @@ func podStartCommand(plan spec.PodLifecyclePlan) (cmd, label, target string, err
 
 // podContainerStart runs the resolved container start over the served host executor. Mirrors
 // StartCmd.runQuadlet / runDirect's exec.
-func podContainerStart(ctx context.Context, exec *sdk.Executor, plan spec.PodLifecyclePlan) error {
+//
+// A FAILED start cleans up after itself. The engine creates the container BEFORE it starts
+// the task, so a start that dies (a venue whose containerd cannot resolve the runtime
+// handler, a missing image at task-create, …) leaves the container CREATED with its name
+// held; every retry then fails `name ... already used`, and a unit-mode failure is worse
+// because systemd's restart policy keeps re-creating the container. Stop the unit (no
+// restart) and remove the partial container through the SAME teardown argv `charly remove`
+// uses (engineRemoveArgv), so the next attempt starts from a free name
+// (opencharly/plugin-containerd#16). The START error is what the operator sees; a cleanup
+// failure is reported beside it, never in place of it.
+func podContainerStart(ctx context.Context, ex venueExecutor, plan spec.PodLifecyclePlan, sel podSelection) error {
 	cmd, label, target, err := podStartCommand(plan)
 	if err != nil {
 		return err
 	}
-	return venueRun(ctx, exec, cmd, label, target)
+	if err := venueRun(ctx, ex, cmd, label, target); err != nil {
+		cleanupFailedPodStart(ctx, ex, plan, sel)
+		return err
+	}
+	return nil
+}
+
+// cleanupFailedPodStart releases everything a failed start may have left behind: the unit
+// (so Restart=always cannot re-create the container) and the container name itself. Both
+// are best-effort and each failure is printed with what it means for the next attempt.
+func cleanupFailedPodStart(ctx context.Context, ex venueExecutor, plan spec.PodLifecyclePlan, sel podSelection) {
+	if kit.IsUnitRunMode(plan.Mode) && !plan.DirectDeploy {
+		if err := podContainerStop(ctx, ex, plan); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: after a failed start, could not stop %s (systemd may restart it): %v\n", plan.SvcName, err)
+		}
+	}
+	rm := engineRemoveArgv(sel.Target, plan.ContainerName)
+	if err := venueRun(ctx, ex, shellJoin(rm), "remove partial container", plan.ContainerName); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: after a failed start, could not remove the partial container %s (a retry may fail with a name-store error): %v\n", plan.ContainerName, err)
+	}
 }
 
 // podContainerStop runs the resolved container stop: a unit run mode (quadlet or
 // systemd-unit) → `systemctl --user stop <svc>` (always via systemctl so podman-stop +
 // Restart=always cannot restart-loop); direct → `<engine> stop <ctr>`.
-func podContainerStop(ctx context.Context, exec *sdk.Executor, plan spec.PodLifecyclePlan) error {
+func podContainerStop(ctx context.Context, ex venueExecutor, plan spec.PodLifecyclePlan) error {
 	if kit.IsUnitRunMode(plan.Mode) {
-		return venueRun(ctx, exec, "systemctl --user stop "+shellquote.ShellQuote(plan.SvcName), "stop", plan.SvcName)
+		return venueRun(ctx, ex, "systemctl --user stop "+shellquote.ShellQuote(plan.SvcName), "stop", plan.SvcName)
 	}
-	return venueRun(ctx, exec, plan.EngineBin+" stop "+shellquote.ShellQuote(plan.ContainerName), "stop", plan.ContainerName)
+	return venueRun(ctx, ex, plan.EngineBin+" stop "+shellquote.ShellQuote(plan.ContainerName), "stop", plan.ContainerName)
 }
 
 // podTunnelOp composes verb:tunnel over InvokeProvider with the {plugin_input:{method,config}}

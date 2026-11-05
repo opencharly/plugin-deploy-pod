@@ -24,10 +24,14 @@ import (
 // resolvePodStartPlan builds the pod START plan. The run mode is the runtime's resolved one:
 // quadlet threads the systemd unit name, systemd-unit threads the engine-emitted service, and
 // direct threads the engine `start_plan` argv.
-func resolvePodStartPlan(ctx context.Context, ex *sdk.Executor, box, instance string, opts spec.PodStartOpts) (*spec.PodLifecyclePlan, error) {
+//
+// It also returns the SELECTION the plan was built from, so a caller that has to clean up a
+// failed start can address the SAME engine target (address/namespace) the launch used, without
+// re-deriving it.
+func resolvePodStartPlan(ctx context.Context, ex *sdk.Executor, box, instance string, opts spec.PodStartOpts) (*spec.PodLifecyclePlan, podSelection, error) {
 	rt, err := kit.ResolveRuntime()
 	if err != nil {
-		return nil, err
+		return nil, podSelection{}, err
 	}
 	// The mode this deploy starts under is the SELECTED engine's, not the host-wide
 	// engine.run's. Resolve the selection BEFORE the mode switch; otherwise a
@@ -36,11 +40,11 @@ func resolvePodStartPlan(ctx context.Context, ex *sdk.Executor, box, instance st
 	// engine). The branch bodies resolve the selection again against the effective rt.
 	dc, err := loadDeploy(ctx, ex, "charly start")
 	if err != nil {
-		return nil, err
+		return nil, podSelection{}, err
 	}
 	sel, err := resolvePodSelectionFromConfig(dc, box, instance, rt)
 	if err != nil {
-		return nil, err
+		return nil, podSelection{}, err
 	}
 	rt = runtimeForSelection(rt, sel)
 	switch rt.RunMode {
@@ -56,30 +60,30 @@ func resolvePodStartPlan(ctx context.Context, ex *sdk.Executor, box, instance st
 // resolvePodStartSystemdUnit resolves the systemd-unit-mode start plan: the engine's emitted
 // .service (unit_emit) is started with `systemctl --user start <svc>`, exactly like the quadlet
 // path starts podman's generated unit. The unit file's existence is the "configured" signal.
-func resolvePodStartSystemdUnit(ctx context.Context, ex *sdk.Executor, box, instance string, rt *kit.ResolvedRuntime) (*spec.PodLifecyclePlan, error) {
+func resolvePodStartSystemdUnit(ctx context.Context, ex *sdk.Executor, box, instance string, rt *kit.ResolvedRuntime) (*spec.PodLifecyclePlan, podSelection, error) {
 	dc, err := loadDeploy(ctx, ex, "charly start")
 	if err != nil {
-		return nil, err
+		return nil, podSelection{}, err
 	}
 	sel, err := resolvePodSelectionFromConfig(dc, box, instance, rt)
 	if err != nil {
-		return nil, err
+		return nil, podSelection{}, err
 	}
 	// The rootful refusal stays FIRST (as it was): the operator gets the reason they cannot
 	// run this deployment, not a secondary "not configured".
 	if rootfulUnsupported(sel.Target, rt.RunMode) {
-		return nil, rootfulRefusal(sel.Engine, rt.RunMode)
+		return nil, podSelection{}, rootfulRefusal(sel.Engine, rt.RunMode)
 	}
 	svc := kit.ServiceNameInstance(box, instance)
 	svcDir, err := kit.SystemdUserDir()
 	if err != nil {
-		return nil, err
+		return nil, podSelection{}, err
 	}
 	if _, err := os.Stat(filepath.Join(svcDir, svc)); err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("not configured; run 'charly config %s' first", box)
+			return nil, podSelection{}, fmt.Errorf("not configured; run 'charly config %s' first", box)
 		}
-		return nil, err
+		return nil, podSelection{}, err
 	}
 	plan := &spec.PodLifecyclePlan{
 		Mode:          "systemd-unit",
@@ -89,32 +93,32 @@ func resolvePodStartSystemdUnit(ctx context.Context, ex *sdk.Executor, box, inst
 	}
 	encJSON, err := resolvePodEncEnsurePlan(ctx, ex, dc, box, instance, false)
 	if err != nil {
-		return nil, err
+		return nil, podSelection{}, err
 	}
 	plan.Enc = encJSON
 	plan.Tunnel = resolvePodTunnelPlan(dc, box, instance)
-	return plan, nil
+	return plan, sel, nil
 }
 
 // resolvePodStartQuadlet resolves the quadlet-mode start plan (the deployed/bed path): the plugin
 // runs `systemctl --user start <svc>` (or `<engine> start <ctr>` through the plan's resolved
 // engine binary for a direct-deploy marker) + mounts encrypted volumes.
-func resolvePodStartQuadlet(ctx context.Context, ex *sdk.Executor, box, instance string, rt *kit.ResolvedRuntime) (*spec.PodLifecyclePlan, error) {
+func resolvePodStartQuadlet(ctx context.Context, ex *sdk.Executor, box, instance string, rt *kit.ResolvedRuntime) (*spec.PodLifecyclePlan, podSelection, error) {
 	exists, err := kit.QuadletExistsInstance(box, instance)
 	if err != nil {
-		return nil, err
+		return nil, podSelection{}, err
 	}
 	directDeploy := !exists && IsDirectDeploy(box, instance)
 	if !exists && !directDeploy {
-		return nil, fmt.Errorf("not configured; run 'charly config %s' first", box)
+		return nil, podSelection{}, fmt.Errorf("not configured; run 'charly config %s' first", box)
 	}
 	dc, err := loadDeploy(ctx, ex, "charly start")
 	if err != nil {
-		return nil, err
+		return nil, podSelection{}, err
 	}
 	sel, err := resolvePodSelectionFromConfig(dc, box, instance, rt)
 	if err != nil {
-		return nil, err
+		return nil, podSelection{}, err
 	}
 	plan := &spec.PodLifecyclePlan{
 		Mode:          "quadlet",
@@ -127,12 +131,12 @@ func resolvePodStartQuadlet(ctx context.Context, ex *sdk.Executor, box, instance
 	if !directDeploy {
 		encJSON, err := resolvePodEncEnsurePlan(ctx, ex, dc, box, instance, false)
 		if err != nil {
-			return nil, err
+			return nil, podSelection{}, err
 		}
 		plan.Enc = encJSON
 	}
 	plan.Tunnel = resolvePodTunnelPlan(dc, box, instance)
-	return plan, nil
+	return plan, sel, nil
 }
 
 // podRuntimeImage is the resolved pod image context shared by the start-plan resolver and the F12
@@ -212,28 +216,33 @@ func resolvePodRuntimeImageWith(ctx context.Context, ex *sdk.Executor, box, inst
 // plugin execs, built by the engine `start_plan` body. It returns RunArgv = buildStartArgs(…)
 // instead of running it, and threads the enc-ensure + tunnel legs. The sidecar-in-direct-mode
 // rejection is preserved (sidecars require a unit run mode).
-func resolvePodStartDirect(ctx context.Context, ex *sdk.Executor, box, instance string, rt *kit.ResolvedRuntime, opts spec.PodStartOpts) (*spec.PodLifecyclePlan, error) {
+func resolvePodStartDirect(ctx context.Context, ex *sdk.Executor, box, instance string, rt *kit.ResolvedRuntime, opts spec.PodStartOpts) (*spec.PodLifecyclePlan, podSelection, error) {
 	dc, err := loadDeploy(ctx, ex, "charly start")
 	if err != nil {
-		return nil, err
+		return nil, podSelection{}, err
 	}
 	sel, err := resolvePodSelectionFromConfig(dc, box, instance, rt)
 	if err != nil {
-		return nil, err
+		return nil, podSelection{}, err
 	}
 	if rootfulUnsupported(sel.Target, rt.RunMode) {
-		return nil, rootfulRefusal(sel.Engine, rt.RunMode)
+		return nil, podSelection{}, rootfulRefusal(sel.Engine, rt.RunMode)
+	}
+	// The direct launch argv names a runtime handler too; refuse a handler this venue cannot
+	// launch BEFORE any image/volume work, exactly as the config path does.
+	if err := ensureVenueRuntimeHandler(sel.Engine); err != nil {
+		return nil, podSelection{}, err
 	}
 	img, err := resolvePodRuntimeImageWith(ctx, ex, box, instance, "", rt, dc, sel, opts.NoAutoDetect, opts.VolumeFlag, opts.Bind)
 	if err != nil {
-		return nil, err
+		return nil, podSelection{}, err
 	}
 	detected, imageRef, meta := img.detected, img.imageRef, img.meta
 	volumes, bindMounts := img.volumes, img.bindMounts
 
 	if dc != nil {
 		if overlay, ok := dc.Lookup(box, instance); ok && len(overlay.Sidecar) > 0 {
-			return nil, fmt.Errorf("image %s has sidecars configured in charly.yml; use 'charly config %s && charly start %s' (sidecars require quadlet mode)", box, box, box)
+			return nil, podSelection{}, fmt.Errorf("image %s has sidecars configured in charly.yml; use 'charly config %s && charly start %s' (sidecars require quadlet mode)", box, box, box)
 		}
 	}
 
@@ -245,10 +254,10 @@ func resolvePodStartDirect(ctx context.Context, ex *sdk.Executor, box, instance 
 
 	encJSON, err := resolvePodEncEnsurePlan(ctx, ex, dc, box, instance, false)
 	if err != nil {
-		return nil, err
+		return nil, podSelection{}, err
 	}
 	if err := deploykit.VerifyBindMounts(bindMounts, box); err != nil {
-		return nil, err
+		return nil, podSelection{}, err
 	}
 
 	deployEnv := meta.Env
@@ -260,7 +269,7 @@ func resolvePodStartDirect(ctx context.Context, ex *sdk.Executor, box, instance 
 	}
 	envVars, err := kit.ResolveEnvVars(startGlobalEnv, deployEnv, "", workspaceBindHost(bindMounts), opts.EnvFile, opts.Env)
 	if err != nil {
-		return nil, err
+		return nil, podSelection{}, err
 	}
 
 	if !security.Privileged {
@@ -273,20 +282,20 @@ func resolvePodStartDirect(ctx context.Context, ex *sdk.Executor, box, instance 
 
 	resolvedNetwork, netErr := kit.ResolveNetwork(network, string(sel.Engine))
 	if netErr != nil {
-		return nil, netErr
+		return nil, podSelection{}, netErr
 	}
 
 	if len(opts.Port) > 0 {
 		ports, err = kit.ApplyPortOverrides(ports, opts.Port)
 		if err != nil {
-			return nil, err
+			return nil, podSelection{}, err
 		}
 		// #55 K4: write the recomputed ports PLUGIN-SIDE (deploykit.SaveDeployState), not over the
 		// deleted "deploy-config-save-state" host seam.
 		deploySaveState(ctx, ex, box, instance, spec.SaveDeployStateInput{Ports: ports, SetPorts: true})
 	}
 	if conflicts := kit.CheckPortAvailability(ports, rt.BindAddress, string(sel.Engine)); len(conflicts) > 0 {
-		return nil, fmt.Errorf("port conflicts detected:%s", kit.FormatPortConflicts(conflicts, box))
+		return nil, podSelection{}, fmt.Errorf("port conflicts detected:%s", kit.FormatPortConflicts(conflicts, box))
 	}
 
 	var deployBox *spec.DeployNode
@@ -305,7 +314,7 @@ func resolvePodStartDirect(ctx context.Context, ex *sdk.Executor, box, instance 
 	workDir := deploykit.ResolveWorkingDir(volumes, bindMounts, home, box, instance)
 	argv, err := buildStartArgs(sel, imageRef, uid, gid, ports, name, volumes, bindMounts, detected.GPU, rt.BindAddress, envVars, security, entrypoint, workDir, resolvedNetwork)
 	if err != nil {
-		return nil, err
+		return nil, podSelection{}, err
 	}
 
 	tunnel := resolvePodTunnelPlan(dc, box, instance)
@@ -313,7 +322,7 @@ func resolvePodStartDirect(ctx context.Context, ex *sdk.Executor, box, instance 
 	return &spec.PodLifecyclePlan{
 		Mode: "direct", ContainerName: name, RunArgv: argv, EngineBin: sel.binary(),
 		Enc: encJSON, Tunnel: tunnel,
-	}, nil
+	}, sel, nil
 }
 
 // resolvePodStopPlan builds the pod STOP plan.

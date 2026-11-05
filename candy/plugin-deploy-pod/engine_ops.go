@@ -3,6 +3,8 @@ package deploypod
 import (
 	"encoding/json"
 	"fmt"
+	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/opencharly/sdk/deploykit"
@@ -134,6 +136,84 @@ func engineDefaultRuntime(c spec.EngineCapability) string {
 		return ""
 	}
 	return c.RuntimeHandlers[0]
+}
+
+// runtimeHandlerBinary maps a runtime-handler word to the executable the launch resolves it
+// through. It mirrors the two arms of nerdctl's `generateRuntimeCOpts` (pkg/cmd/container/
+// run_runtime.go) and containerd's shim naming (pkg/shim.BinaryName), because those are the
+// programs that decide whether a `--runtime <word>` can start:
+//
+//   - an ABSOLUTE PATH is the executable itself;
+//   - a runtime TYPE (`io.containerd.*`) resolves to `containerd-shim-<second-last>-<last>`;
+//   - every other word is a BARE OCI-runtime binary name, which nerdctl resolves with
+//     exec.LookPath and launches through the `io.containerd.runc.v2` shim.
+//
+// An unrepresentable word returns "", which the probe treats as "not installed".
+func runtimeHandlerBinary(handler string) string {
+	if strings.Contains(handler, "/") {
+		return handler
+	}
+	if strings.HasPrefix(handler, "io.containerd.") || handler == "wtf.sbk.runj.v1" {
+		parts := strings.Split(handler, ".")
+		if len(parts) < 2 {
+			return ""
+		}
+		return "containerd-shim-" + parts[len(parts)-2] + "-" + parts[len(parts)-1]
+	}
+	return handler
+}
+
+// venueRuntimeHandlers returns the SORTED subset of the engine's declared runtime handlers
+// that this venue can actually launch: for each candidate it asks the SAME resolution the
+// launch will (exec.LookPath over the runtime executable, see runtimeHandlerBinary).
+//
+// MEASURED on this host's rootless containerd 2.3.5 (nerdctl 2.4.1): `/usr/bin/crun` is
+// absent, `nerdctl run --runtime crun` fails `failed to resolve runtime path: invalid
+// runtime name crun`, and `--runtime runc` succeeds because `/usr/bin/runc` is installed.
+// The venue, not the capability row, is what makes a handler runnable.
+func venueRuntimeHandlers(c spec.EngineCapability) []string {
+	installed := make([]string, 0, len(c.RuntimeHandlers))
+	for _, handler := range c.RuntimeHandlers {
+		binary := runtimeHandlerBinary(handler)
+		if binary == "" {
+			continue
+		}
+		if _, err := exec.LookPath(binary); err == nil {
+			installed = append(installed, handler)
+		}
+	}
+	sort.Strings(installed)
+	return installed
+}
+
+// ensureVenueRuntimeHandler refuses a config/start step whose launch argv would name a
+// runtime handler THIS VENUE cannot launch. Without it the capability row alone names the
+// handler (`engineDefaultRuntime`), so a venue without that handler emits a unit whose
+// ExecStart can never start: systemd restart-loops and the failed attempt leaves the
+// container CREATED with its name held, so every retry dies `name ... already used`
+// (opencharly/plugin-containerd#16).
+//
+// It refuses instead of falling back to another handler: a silent switch to a different
+// OCI runtime is a different substrate (R3). An engine that declares NO runtime handlers
+// (podman, docker) takes exactly the path it took before — no probe, no `--runtime`, no new
+// failure mode.
+func ensureVenueRuntimeHandler(engine spec.EngineName) error {
+	c, ok := container.EngineCapabilityFor(string(engine))
+	if !ok || len(c.RuntimeHandlers) == 0 {
+		return nil
+	}
+	selected := engineDefaultRuntime(c)
+	installed := venueRuntimeHandlers(c)
+	for _, handler := range installed {
+		if handler == selected {
+			return nil
+		}
+	}
+	reported := strings.Join(installed, ", ")
+	if reported == "" {
+		reported = "none of " + strings.Join(c.RuntimeHandlers, ", ")
+	}
+	return fmt.Errorf("engine %q: the selected runtime handler %q is not installed on this venue (the venue reports: %s); remedy: install a %q runtime handler on the venue (the layer-containerd candy installs crun and krun), or point the deploy at a venue that has it", engine, selected, reported, selected)
 }
 
 // engineGlobalArgs returns the engine CLI's connection flags from the RESOLVED target. Only
