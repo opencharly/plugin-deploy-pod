@@ -75,7 +75,11 @@ func writeSystemdUnitConfig(rt *kit.ResolvedRuntime, sel podSelection, qcfg depl
 		StartArgv:   argv,
 		StopArgv:    engineStopArgv(sel.Target, name),
 		Description: "charly deployment " + name,
-		WorkingDir:  workingDir,
+		// NO systemd WorkingDirectory=: this is a HOST unit that runs the engine CLI, and the
+		// engine's own `run -w <container-path>` (already in StartArgv) sets the CONTAINER's
+		// workdir. Passing the container path here made systemd CHDIR to /home/user on the
+		// host and fail status=200/CHDIR on the first live containerd pod bed (measured).
+		WorkingDir: "",
 	})
 	if err != nil {
 		return nil, err
