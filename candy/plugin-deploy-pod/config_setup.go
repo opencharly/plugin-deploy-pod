@@ -249,7 +249,7 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, s
 	// `if dc != nil && dc.Deploy != nil` guard here skipped port resolution entirely on a fresh
 	// disposable bed's first-ever config (no per-host overlay yet), which deterministically
 	// collided every check-pod-derived bed on the shared literal container port 18794.
-	if err := resolveDeployPorts(ctx, ex, &dc, spec.DeployKey(c.Box, c.Instance), &meta); err != nil {
+	if err := resolveDeployPorts(ctx, ex, &dc, spec.DeployKey(c.Box, c.Instance), &meta, c.Port...); err != nil {
 		return err
 	}
 
