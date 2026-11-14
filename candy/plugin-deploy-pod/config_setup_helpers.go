@@ -285,7 +285,7 @@ func persistResourceCaps(ctx context.Context, ex *sdk.Executor, dc **deploykit.D
 // resolution (and, as a side effect, every other per-deploy overlay merge downstream in
 // MergeDeployOntoMetadata, which shares the same dc.Deploy-nil guard) run correctly on a bed's
 // very first config, matching every subsequent config/update.
-func resolveDeployPorts(ctx context.Context, ex *sdk.Executor, dc **deploykit.DeployConfig, key string, meta *spec.BoxMetadata) error {
+func resolveDeployPorts(ctx context.Context, ex *sdk.Executor, dc **deploykit.DeployConfig, key string, meta *spec.BoxMetadata, cliPins ...string) error {
 	containerPorts := kit.ContainerPortsFromMappings(meta.Port)
 	var resolved []string
 	// The ALLOCATION runs inside the locked cycle, against a freshly-read overlay — not just the
@@ -294,10 +294,17 @@ func resolveDeployPorts(ctx context.Context, ex *sdk.Executor, dc **deploykit.De
 	// beds the same host port even though the file write itself is serialized.
 	fresh, err := mutateDeploy(ctx, ex, "charly config resolve-ports", func(d *deploykit.DeployConfig) (bool, error) {
 		overlay := d.Deploy[key]
-		if len(containerPorts) == 0 && len(overlay.Port) == 0 {
+		// The operator's own `-p` pins are part of the resolver's INPUT, not only of the
+		// post-resolution override merge: this resolution runs BEFORE config_setup.go applies
+		// c.Port, and the quadlet publishes ResolvedPort — so on a deploy's FIRST config a pin
+		// would otherwise be replaced by an auto-allocation, be accepted, printed, and silently
+		// dropped (plugin-deploy-pod#52). CLI pins go LAST so they win over an authored entry
+		// pin, matching kit.ApplyPortOverrides' precedence.
+		pins := append(append([]string{}, overlay.Port...), cliPins...)
+		if len(containerPorts) == 0 && len(pins) == 0 {
 			return false, nil
 		}
-		picked, rErr := kit.ResolveDeployPorts(containerPorts, overlay.Port, overlay.ResolvedPort, deploykit.OccupiedHostPorts(d, key))
+		picked, rErr := kit.ResolveDeployPorts(containerPorts, pins, overlay.ResolvedPort, deploykit.OccupiedHostPorts(d, key))
 		if rErr != nil {
 			return false, fmt.Errorf("resolving deploy ports: %w", rErr)
 		}
