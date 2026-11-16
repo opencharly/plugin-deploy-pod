@@ -138,3 +138,96 @@ check-pod-ensure-gate:
                     cat "$LOG"
                     echo PE-CONFIG-OK
 
+
+# ---------------------------------------------------------------------------
+# THE R10 BED for the missing-required-secret REPORT (opencharly/plugin-deploy-pod#61).
+#
+# WHY THIS BED EXISTS: the change under test is the text `charly config` prints when a required
+# credential-backed secret does not resolve. Two failures used to render as one ("Store them in the
+# credential backend"): a store that could not be READ (a locked or unreachable keyring) and a
+# readable store whose coordinate is empty. The bed drives the REAL `charly config` on the ACTIVE
+# binary against an image whose labels declare a required credential at an explicit coordinate
+# (`charly/api-key/qdrant`), forcing each class through the environment instead of a stub — so both
+# changed branches EXECUTE, which is the R10 claim the unit tests alone cannot make.
+#
+# ARM A — store unreadable: a keyring backend pointed at a session bus that does not exist, so the
+# probe fails and the resolver classifies the lookup `unavailable`.
+# ARM B — store readable, coordinate empty: the config backend over an empty XDG config dir, so the
+# store answers "not stored" (`default`) rather than "cannot be read".
+#
+# THE SUBJECT'S IMAGE MUST BE PRESENT LOCALLY, and that is stated rather than hidden: the org's
+# ghcr packages refuse ANONYMOUS pulls (measured 2026-11-16 — `ghcr.io/token?scope=repository:
+# opencharly/<any>:pull` answers HTTP 403, which is also why the sibling `check-pod-ensure-gate`
+# arm that PULLS `check-firecracker-app` cannot run on a clean host). This bed therefore asserts the
+# MESSAGE, not image provisioning, and needs an image whose labels carry `secret_require` with a
+# `key:` override — `ghcr.io/opencharly/owui-qdrant-proof` is that image where the umbrella's own bed
+# has already produced it. Making the subject pullable is opencharly/plugin-deploy-pod#65.
+pod-secret-diag:
+    pod:
+        image: ghcr.io/opencharly/owui-qdrant-proof:2026.319.0931
+        disposable: true
+
+pod-secret-diag-template:
+    local:
+        description: |-
+            Minimal kind:local template for the secret-diagnostic bed: composes THIS repo's
+            out-of-tree `plugin-deploy-pod` candy so the host builds the plugin from this worktree,
+            and carries no plan — the checks live on the deploy that composes it.
+        candy:
+            - plugin-deploy-pod
+
+check-pod-secret-diagnostic:
+    local:
+        from: pod-secret-diag-template
+        host: local
+        disposable: true
+        lifecycle: test
+        plan:
+            - check: the missing-required-secret report names the queried coordinate, says when the
+                  store could not be READ (no store-it advice), and keeps the store-it advice only for
+                  a readable store whose coordinate is empty
+              id: pd-secret-unreadable-vs-absent
+              context: [runtime]
+              timeout: 900s
+              exit_status: 0
+              stdout:
+                contains: PD-SECRET-DIAG-OK
+              command:
+                in_container: false
+                command: |
+                    set -eu
+                    LOG="$PWD/.check/pod-secret-diagnostic.log"; mkdir -p "$(dirname "$LOG")"
+                    rm -f "$LOG.a" "$LOG.b"; rm -rf "$PWD/.check/pod-secret-diag-empty-xdg"
+                    mkdir -p "$PWD/.check/pod-secret-diag-empty-xdg"
+                    arms() {
+                    echo "== the binary under test is ${CHARLY_BIN} ($(${CHARLY_BIN} version 2>/dev/null | tail -1))"
+                    echo "== ARM A — store UNREADABLE (keyring backend, session bus absent)"
+                    if DBUS_SESSION_BUS_ADDRESS="unix:path=$PWD/.check/pod-secret-diag-absent-bus" \
+                       CHARLY_SECRET_BACKEND=keyring ${CHARLY_BIN} config pod-secret-diag -e WEBUI_ADMIN_EMAIL=bed@example.com >"$LOG.a" 2>&1; then
+                      echo "arm A rc=0 — the config did NOT stop on a required unresolvable secret"; fi
+                    echo "arm A rc=$?"
+                    grep -Ev '^plugin ' "$LOG.a" | tail -26 || true
+                    echo "== ARM B — store READABLE, coordinate EMPTY (config backend, empty XDG)"
+                    if XDG_CONFIG_HOME="$PWD/.check/pod-secret-diag-empty-xdg" CHARLY_SECRET_BACKEND=config \
+                       ${CHARLY_BIN} config pod-secret-diag -e WEBUI_ADMIN_EMAIL=bed@example.com >"$LOG.b" 2>&1; then
+                      echo "arm B rc=0 — the config did NOT stop on a required unresolvable secret"; fi
+                    echo "arm B rc=$?"
+                    grep -Ev '^plugin ' "$LOG.b" | tail -26 || true
+                    }
+                    if arms >"$LOG" 2>&1; then :; else rc=$?; cat "$LOG"; exit $rc; fi
+                    # ARM A: the unreadable store is NAMED, its source rendered, the queried coordinate
+                    # named, and no store-it advice — the regression this change closes.
+                    grep -q 'could not READ the credential store' "$LOG.a" || { echo "arm A: the unreadable store is not named"; cat "$LOG.a"; exit 1; }
+                    grep -q 'source: unavailable' "$LOG.a" || { echo "arm A: the resolver source is not rendered"; cat "$LOG.a"; exit 1; }
+                    grep -q 'charly/api-key/qdrant' "$LOG.a" || { echo "arm A: the queried coordinate is not named"; cat "$LOG.a"; exit 1; }
+                    grep -q 'charly secrets get charly/api-key qdrant' "$LOG.a" || { echo "arm A: no way for the operator to confirm the value"; cat "$LOG.a"; exit 1; }
+                    if grep -q 'Store them in the credential backend' "$LOG.a"; then
+                      echo "arm A: an unreadable store still advises a store operation"; cat "$LOG.a"; exit 1; fi
+                    # ARM B: a readable store with an empty coordinate keeps the advice AND names the
+                    # coordinate, and must NOT be reported as unreadable.
+                    grep -q 'Store them in the credential backend' "$LOG.b" || { echo "arm B: the store-it advice vanished for a readable store"; cat "$LOG.b"; exit 1; }
+                    grep -q 'charly/api-key/qdrant' "$LOG.b" || { echo "arm B: the queried coordinate is not named"; cat "$LOG.b"; exit 1; }
+                    if grep -q 'could not READ the credential store' "$LOG.b"; then
+                      echo "arm B: a readable store was reported unreadable"; cat "$LOG.b"; exit 1; fi
+                    cat "$LOG"
+                    echo PD-SECRET-DIAG-OK
