@@ -104,39 +104,101 @@ func checkMissingEnvRequires(boxName string, requires []spec.EnvDependency, reso
 	return fmt.Errorf("missing required environment variable(s) for %s", boxName)
 }
 
-// checkMissingSecretRequires mirrors charly-core's function of the same name, over the
-// plugin-local secretResolution (the wire-decoded form of core's SecretResolution).
+// checkMissingSecretRequires reports the required credential-backed secrets this deploy could not
+// resolve, and classifies the failure before advising a remedy.
 func checkMissingSecretRequires(boxName string, requires []spec.EnvDependency, resolutions []secretResolution) error {
+	report, err := missingSecretReport(boxName, requires, resolutions)
+	if report != "" {
+		fmt.Fprint(os.Stderr, report)
+	}
+	return err
+}
+
+// missingSecretReport is the pure body of checkMissingSecretRequires: it returns the operator-facing
+// report and the error, and decides which of two VERY different failures the deploy hit.
+//
+// The resolution carries the resolver's SOURCE (`keyring` | `config` | `env` | `locked` |
+// `unavailable` | `default`), and this function used to discard it — so an unreadable store
+// ("locked", "unavailable") rendered exactly like an absent credential, and the operator was told to
+// store a value they already had, at the default coordinate, duplicating it
+// (opencharly/plugin-deploy-pod#61, reported from the field as opencharly/sdk#526). Every missing
+// entry now names the coordinate it was looked up at — the same `secretKeyForDep` split the resolver
+// uses, so the report cannot disagree with the query — and an unreadable store produces its own
+// message and its own error.
+func missingSecretReport(boxName string, requires []spec.EnvDependency, resolutions []secretResolution) (string, error) {
 	resolvedByName := make(map[string]bool, len(resolutions))
+	sourceByName := make(map[string]string, len(resolutions))
 	for _, r := range resolutions {
 		if r.Resolved {
 			resolvedByName[r.Name] = true
+			continue
 		}
+		sourceByName[r.Name] = r.Source
 	}
-	var missing []spec.EnvDependency
+
+	var missing, unreadable []spec.EnvDependency
 	for _, dep := range requires {
-		if !resolvedByName[dep.Name] {
-			missing = append(missing, dep)
+		if resolvedByName[dep.Name] {
+			continue
 		}
-	}
-	if len(missing) == 0 {
-		return nil
-	}
-	fmt.Fprintf(os.Stderr, "\nError: %s requires the following credential-backed secret(s):\n\n", boxName)
-	for _, dep := range missing {
-		desc := ""
-		if dep.Description != "" {
-			desc = " — " + dep.Description
+		if secretSourceUnreadable(sourceByName[dep.Name]) {
+			unreadable = append(unreadable, dep)
+			continue
 		}
-		fmt.Fprintf(os.Stderr, "  %s%s\n", dep.Name, desc)
+		missing = append(missing, dep)
 	}
-	fmt.Fprintf(os.Stderr, "\nStore them in the credential backend, or pass -e once to auto-import:\n\n")
-	fmt.Fprintf(os.Stderr, "  charly config %s", boxName)
-	for _, dep := range missing {
-		fmt.Fprintf(os.Stderr, " -e %s=...", dep.Name)
+	if len(missing) == 0 && len(unreadable) == 0 {
+		return "", nil
 	}
-	fmt.Fprintf(os.Stderr, "\n\n")
-	return fmt.Errorf("missing required credential-backed secret(s) for %s", boxName)
+
+	var b strings.Builder
+	if len(unreadable) > 0 {
+		fmt.Fprintf(&b, "\nError: %s could not READ the credential store for:\n\n", boxName)
+		for _, dep := range unreadable {
+			service, key := secretKeyForDep(dep)
+			fmt.Fprintf(&b, "  %-34s %s/%s (source: %s)\n", dep.Name, service, key, sourceByName[dep.Name])
+		}
+		fmt.Fprintf(&b, "\nThe value may well be stored — an unreadable store is NOT an absent credential.\n")
+		fmt.Fprintf(&b, "  locked:      unlock your keyring, then re-run this command\n")
+		fmt.Fprintf(&b, "  unavailable: start a Secret Service provider, or pin `charly settings set secret_backend config`\n")
+		fmt.Fprintf(&b, "To confirm the value yourself: charly secrets get %s\n\n", secretCoordinateHint(unreadable[0]))
+	}
+	if len(missing) > 0 {
+		fmt.Fprintf(&b, "\nError: %s requires the following credential-backed secret(s):\n\n", boxName)
+		for _, dep := range missing {
+			service, key := secretKeyForDep(dep)
+			desc := ""
+			if dep.Description != "" {
+				desc = " — " + dep.Description
+			}
+			fmt.Fprintf(&b, "  %-34s %s/%s%s\n", dep.Name, service, key, desc)
+		}
+		fmt.Fprintf(&b, "\nStore them in the credential backend, or pass -e once to auto-import:\n\n")
+		fmt.Fprintf(&b, "  charly config %s", boxName)
+		for _, dep := range missing {
+			fmt.Fprintf(&b, " -e %s=...", dep.Name)
+		}
+		fmt.Fprintf(&b, "\n\n")
+	}
+
+	if len(unreadable) > 0 {
+		return b.String(), fmt.Errorf("could not read the credential store for %d required secret(s) on %s", len(unreadable), boxName)
+	}
+	return b.String(), fmt.Errorf("missing required credential-backed secret(s) for %s", boxName)
+}
+
+// secretSourceUnreadable reports whether a resolution's SOURCE means the STORE could not be read, as
+// opposed to "the store was read and this coordinate is empty". Only the two unreadable sources
+// suppress the store-it advice.
+func secretSourceUnreadable(source string) bool {
+	return source == "locked" || source == "unavailable"
+}
+
+// secretCoordinateHint renders a dependency's store identity as `service key` for a copy-pasteable
+// `charly secrets get` — the same split `secretKeyForDep` gives the resolver.
+func secretCoordinateHint(dep spec.EnvDependency) string {
+	service, key := secretKeyForDep(dep)
+	return service + " " + key
 }
 
 // warnMissingMCPRequires mirrors charly-core's function of the same name.
