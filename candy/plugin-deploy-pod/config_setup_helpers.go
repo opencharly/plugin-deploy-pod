@@ -122,7 +122,7 @@ func checkMissingSecretRequires(boxName string, requires []spec.EnvDependency, r
 // ("locked", "unavailable") rendered exactly like an absent credential, and the operator was told to
 // store a value they already had, at the default coordinate, duplicating it
 // (opencharly/plugin-deploy-pod#61, reported from the field as opencharly/sdk#526). Every missing
-// entry now names the coordinate it was looked up at — the same `secretKeyForDep` split the resolver
+// entry now names the coordinate it was looked up at — the same `deploykit.SecretKeyForDep` split the resolver
 // uses, so the report cannot disagree with the query — and an unreadable store produces its own
 // message and its own error.
 func missingSecretReport(boxName string, requires []spec.EnvDependency, resolutions []secretResolution) (string, error) {
@@ -155,7 +155,7 @@ func missingSecretReport(boxName string, requires []spec.EnvDependency, resoluti
 	if len(unreadable) > 0 {
 		fmt.Fprintf(&b, "\nError: %s could not READ the credential store for:\n\n", boxName)
 		for _, dep := range unreadable {
-			service, key := secretKeyForDep(dep)
+			service, key := deploykit.SecretKeyForDep(dep)
 			fmt.Fprintf(&b, "  %-34s %s/%s (source: %s)\n", dep.Name, service, key, sourceByName[dep.Name])
 		}
 		fmt.Fprintf(&b, "\nThe value may well be stored — an unreadable store is NOT an absent credential.\n")
@@ -166,7 +166,7 @@ func missingSecretReport(boxName string, requires []spec.EnvDependency, resoluti
 	if len(missing) > 0 {
 		fmt.Fprintf(&b, "\nError: %s requires the following credential-backed secret(s):\n\n", boxName)
 		for _, dep := range missing {
-			service, key := secretKeyForDep(dep)
+			service, key := deploykit.SecretKeyForDep(dep)
 			desc := ""
 			if dep.Description != "" {
 				desc = " — " + dep.Description
@@ -195,9 +195,9 @@ func secretSourceUnreadable(source string) bool {
 }
 
 // secretCoordinateHint renders a dependency's store identity as `service key` for a copy-pasteable
-// `charly secrets get` — the same split `secretKeyForDep` gives the resolver.
+// `charly secrets get` — the same split `deploykit.SecretKeyForDep` gives the resolver.
 func secretCoordinateHint(dep spec.EnvDependency) string {
-	service, key := secretKeyForDep(dep)
+	service, key := deploykit.SecretKeyForDep(dep)
 	return service + " " + key
 }
 

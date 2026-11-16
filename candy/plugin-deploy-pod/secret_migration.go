@@ -50,19 +50,6 @@ func secretDeclaredOnBox(meta *spec.BoxMetadata) map[string]bool {
 	return names
 }
 
-// secretKeyForDep returns the (service, key) tuple used to look up a secret in the credential
-// store. When the candy author set an explicit `key: charly/api-key/openrouter` override, that's
-// parsed into its two segments; otherwise the default (charly/secret, dep.Name) is returned. The
-// format is enforced by validateSecretDeps at build time, so this is purely a structural split.
-func secretKeyForDep(dep spec.EnvDependency) (service, key string) {
-	if dep.Key != "" {
-		if idx := strings.LastIndex(dep.Key, "/"); idx >= 0 {
-			return dep.Key[:idx], dep.Key[idx+1:]
-		}
-	}
-	return "charly/secret", dep.Name
-}
-
 // migratePlaintextEnvSecret scans dc.Deploy[deployKey(image, instance)].Env for any KEY=VAL
 // entries whose KEY is declared as secret_accepts/secret_requires on the given image metadata.
 // For each match it writes VAL into the credential store at the candy-declared (service, key),
@@ -126,7 +113,7 @@ func migratePlaintextEnvSecret(ctx context.Context, ex *sdk.Executor, dc *deploy
 	var migratedNames []string
 	for _, p := range toMigrate {
 		dep := depByName[p.depName]
-		service, credKey := secretKeyForDep(dep)
+		service, credKey := deploykit.SecretKeyForDep(dep)
 		if err := cred.Write(service, credKey, p.value); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not migrate %s to credential store (%s/%s): %v\n", p.depName, service, credKey, err)
 			// Keep the plaintext entry so the user isn't left without a value; retry after fixing.
@@ -211,7 +198,7 @@ func scrubSecretCLIEnv(ctx context.Context, ex *sdk.Executor, cliEnv []string, m
 			continue
 		}
 		dep := depByName[name]
-		service, credKey := secretKeyForDep(dep)
+		service, credKey := deploykit.SecretKeyForDep(dep)
 		if err := cred.Write(service, credKey, val); err != nil {
 			// On Write failure, keep the CLI entry so the deployment isn't silently broken; the
 			// normal env_resolution path picks up the -e value via ResolveCredential's env-first chain.
