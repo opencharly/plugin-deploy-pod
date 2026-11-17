@@ -72,20 +72,12 @@ func buildOverlay(ctx context.Context, exec *sdk.Executor, reply spec.OverlayBui
 		return "", fmt.Errorf("overlay render: %w", err)
 	}
 
-	// Resolve the overlay candies' secret_requires:/secret_accepts: env PLUGIN-SIDE + inject it
-	// into the plans' TaskSteps before oci.Emit walks them (#55 coneB-br2 — the α cluster
-	// relocated host-side from charly/enc.go + charly/layer_secrets.go + charly/build_overlay.go,
-	// which are DELETED in that cutover). This mirrors candy/plugin-deploy/secrets_artifacts.go's
-	// injectCandySecrets exactly: the candy set is dg.Candies (the resolved-project envelope's
-	// candy models — deploykit.CandyModel is a spec.CandyReader alias, so it passes directly to
-	// SelectCandiesForPlans); the credential access is the shared
-	// deploykit.CredentialAccessViaExecutor (verb:credential = candy/plugin-secrets over the
-	// reverse channel — the SAME store the former host coreCredentialAccess reached via
-	// ResolveCredential/DefaultCredentialStore). Byte-identical to the former host-side
-	// resolveCandySecrets → deploykit.ResolveSecretForC candy → deploykit.InjectSecretsIntoPlans.
-	candyList := deploykit.SelectCandiesForPlans(plans, dg.Candies)
-	secretEnv := deploykit.ResolveSecretForCandy(candyList, deploykit.CredentialAccessViaExecutor(ctx, exec))
-	deploykit.InjectSecretsIntoPlans(plans, secretEnv)
+	// Resolve the overlay candies' secret_requires:/secret_accepts: env PLUGIN-SIDE and merge it into
+	// the plans' Op steps before oci.Emit walks them (#55 coneB-br2 — the α cluster relocated
+	// host-side from charly/enc.go + charly/layer_secrets.go + charly/build_overlay.go, which are
+	// DELETED in that cutover). NAMED so the behaviour has a call site a test can drive:
+	// `deliverSecretEnv` below is the whole of this step, and the harness exercises it.
+	deliverSecretEnv(plans, dg.Candies, deploykit.CredentialAccessViaExecutor(ctx, exec))
 
 	overlayCandies := collectOverlayCandies(plans)
 
@@ -389,6 +381,26 @@ func tagDeployAlias(ctx context.Context, exec *sdk.Executor, reply spec.OverlayB
 	}
 	tagScript := fmt.Sprintf("%s tag %s %s", engineBin, shellquote.ShellQuote(imageRef), shellquote.ShellQuote(aliasRef))
 	return venueRun(ctx, exec, tagScript, "deploy-name alias tag", reply.DeployName)
+}
+
+// deliverSecretEnv resolves the overlay candies' `use: secret:` environment and merges it into the
+// plans' Op steps, which is what oci.Emit then walks.
+//
+// IT IS TODAY THE ONLY VALUE-INTO-ENV PATH in the overlay build, AND IT IS DELIBERATE. `ResolveSecretForCandy`
+// → `deploykit.InjectSecretsIntoPlans` puts a secret's VALUE into `OpStep.Op.Env`, which D-SEC-1
+// forbids; removing it (plugin-deploy-pod#69) was closed because it broke four measured consumers
+// that read the value from the environment — e.g. `layer-qdrant/charly.yml:34` declares
+// `secret_require: QDRANT__SERVICE__API_KEY` and its service reads `$QDRANT__SERVICE__API_KEY`
+// (`:112`). The delivery contract is that a secret reaches a task as a FILE's content on the venue,
+// never as an environment value, and moving from this call to that one is Wave C's job once the
+// capability-type owner delivers. DO NOT delete this call on its own.
+//
+// What the harness pins, given no candy asks for a secret (the state of the tree: no candy authors
+// `use: secret:`, measured 0), is that the step is a NO-OP: the credential store is never consulted,
+// no environment key is added, and the compiler's FileSteps and their order are untouched.
+func deliverSecretEnv(plans []*spec.InstallPlan, candies map[string]spec.CandyReader, cred deploykit.CredentialAccess) {
+	candyList := deploykit.SelectCandiesForPlans(plans, candies)
+	deploykit.InjectSecretsIntoPlans(plans, deploykit.ResolveSecretForCandy(candyList, cred))
 }
 
 // collectOverlayCandies returns the set of candy names declared as add_candy in any plan's meta.
