@@ -72,20 +72,12 @@ func buildOverlay(ctx context.Context, exec *sdk.Executor, reply spec.OverlayBui
 		return "", fmt.Errorf("overlay render: %w", err)
 	}
 
-	// Resolve the overlay candies' secret_requires:/secret_accepts: env PLUGIN-SIDE + inject it
-	// into the plans' TaskSteps before oci.Emit walks them (#55 coneB-br2 — the α cluster
-	// relocated host-side from charly/enc.go + charly/layer_secrets.go + charly/build_overlay.go,
-	// which are DELETED in that cutover). This mirrors candy/plugin-deploy/secrets_artifacts.go's
-	// injectCandySecrets exactly: the candy set is dg.Candies (the resolved-project envelope's
-	// candy models — deploykit.CandyModel is a spec.CandyReader alias, so it passes directly to
-	// SelectCandiesForPlans); the credential access is the shared
-	// deploykit.CredentialAccessViaExecutor (verb:credential = candy/plugin-secrets over the
-	// reverse channel — the SAME store the former host coreCredentialAccess reached via
-	// ResolveCredential/DefaultCredentialStore). Byte-identical to the former host-side
-	// resolveCandySecrets → deploykit.ResolveSecretForC candy → deploykit.InjectSecretsIntoPlans.
-	candyList := deploykit.SelectCandiesForPlans(plans, dg.Candies)
-	secretEnv := deploykit.ResolveSecretForCandy(candyList, deploykit.CredentialAccessViaExecutor(ctx, exec))
-	deploykit.InjectSecretsIntoPlans(plans, secretEnv)
+	// Resolve the overlay candies' secret_requires:/secret_accepts: env PLUGIN-SIDE and merge it into
+	// the plans' Op steps before oci.Emit walks them (#55 coneB-br2 — the α cluster relocated
+	// host-side from charly/enc.go + charly/layer_secrets.go + charly/build_overlay.go, which are
+	// DELETED in that cutover). NAMED so the behaviour has a call site a test can drive:
+	// `deliverSecretEnv` below is the whole of this step, and the harness exercises it.
+	deliverSecretEnv(plans, dg.Candies, deploykit.CredentialAccessViaExecutor(ctx, exec))
 
 	overlayCandies := collectOverlayCandies(plans)
 
@@ -389,6 +381,48 @@ func tagDeployAlias(ctx context.Context, exec *sdk.Executor, reply spec.OverlayB
 	}
 	tagScript := fmt.Sprintf("%s tag %s %s", engineBin, shellquote.ShellQuote(imageRef), shellquote.ShellQuote(aliasRef))
 	return venueRun(ctx, exec, tagScript, "deploy-name alias tag", reply.DeployName)
+}
+
+// deliverSecretEnv resolves the overlay candies' `use: secret:` environment and merges it into the
+// plans' Op steps, which is what oci.Emit then walks.
+//
+// IT IS TODAY THE ONLY VALUE-INTO-ENV PATH in the overlay build, AND IT IS DELIBERATE. `ResolveSecretForCandy`
+// → `deploykit.InjectSecretsIntoPlans` puts a secret's VALUE into `OpStep.Op.Env`, which D-SEC-1
+// forbids; removing it (plugin-deploy-pod#69) was closed because it broke four measured consumers
+// that read the value from the environment — e.g. `layer-qdrant/charly.yml:34` declares
+// `secret_require: QDRANT__SERVICE__API_KEY` and its service reads `$QDRANT__SERVICE__API_KEY`
+// (`:112`). D-SEC-1's requirement is that the value does not enter the PLAN -- not that it never
+// reaches the process as a variable. DESIGN.md:387 says a `secret` use delivers BYTES; a process
+// environment variable is one way those bytes arrive, and a file on the venue is another. What the
+// rule forbids is the value being baked into the rendered script at PLAN time, which is what
+// `ts.Op.Env[k] = v` does and what this call therefore has to stop doing.
+//
+// So there are TWO delivery shapes, and they answer different destinations:
+//
+//   - THIS call: a task's Op env, at PLAN time. Its replacement is a FILE on the venue, because a
+//     plan step cannot carry a value without baking it.
+//
+//   - config_setup.go's seam: the container's `Env:`, written HOST-SIDE at CONFIG time. That value
+//     never touches the PLAN. It does NOT satisfy D-SEC-1 on its own, and this comment must not say it
+//     does: D-SEC-1 lists "the store, artifacts, labels, the IR, STATE or output", `state` separately
+//     from the IR, and the config writer PERSISTS `Environment=` into the deployment's unit. So the
+//     seam narrows exposure from plan + state to state, and stops there.
+//
+//     The contract's answer is that what enters state is a HANDLE, not a value: `#BindOutput.binding`
+//     is `#Opaque` and "core never inspects it" (spec/schema/bind.cue:48-52), delivered at REALIZE by
+//     the type owner's `bind` (DESIGN.md:685). Until that owner exists, this seam is an ORDERING step
+//     toward it -- never a compliance claim.
+//
+// An earlier version of this comment said a secret reaches a task "never as an environment value".
+// That was wrong as a universal claim -- it described THIS path's replacement and read as a rule
+// about all delivery. DO NOT delete this call on its own.
+//
+// What the harness pins, given no candy asks for a secret (the state of the tree: no candy authors
+// `use: secret:`, measured 0), is that the step is a NO-OP: the credential store is never consulted,
+// no environment key is added, and the compiler's FileSteps and their order are untouched.
+func deliverSecretEnv(plans []*spec.InstallPlan, candies map[string]spec.CandyReader, cred deploykit.CredentialAccess) {
+	candyList := deploykit.SelectCandiesForPlans(plans, candies)
+	deploykit.InjectSecretsIntoPlans(plans, deploykit.ResolveSecretForCandy(candyList, cred))
 }
 
 // collectOverlayCandies returns the set of candy names declared as add_candy in any plan's meta.
