@@ -371,6 +371,16 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, s
 		fmt.Fprintf(os.Stderr, "Warning: port conflicts detected:%s", kit.FormatPortConflicts(conflicts, c.Box))
 	}
 
+	// CONFIG-TIME secret delivery (D-SEC-1, the `state` limb): ENSURE the deploy box chain's
+	// required secrets exist — minting one when a `secret_require:` is missing everywhere — BEFORE
+	// provisioning, so a value a first `charly config` mints is the one provisioned. Nothing is
+	// appended to envVars here: the container's `Env:` is STATE, and DELIVERY is the unit's
+	// `Secret=<name>,type=env,target=<VAR>` reference, resolved by podman at REALIZE. Scoped to this
+	// deploy's box chain so no foreign candy's required secret is minted (see config_secret_env.go).
+	if uf, ok, ufErr := loadUnifiedForBox(ctx, ex, c.Box); ufErr == nil && ok && uf != nil {
+		EnsureBoxChainSecrets(uf, dc, c.Box, c.Instance, deploykit.CredentialAccessViaExecutor(ctx, ex))
+	}
+
 	autoGen := c.Password == "auto"
 	provisioned, provFallback, provResolutions, isKeyring, perr := resolvePodProvisionSecrets(ctx, ex, &meta, c.Box, c.Instance, string(sel.Engine), autoGen, c.RefreshSecret)
 	if perr != nil {
@@ -416,15 +426,6 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, s
 		resolvedSidecars = scRes.Sidecars
 	}
 	envVars = mergeEnvSlices(envVars, c.Env)
-
-	// CONFIG-TIME secret delivery (D-SEC-1): the values reach the venue's environment from the
-	// credential store, host-side, and never through the plan — `Op.Env` is baked at PLAN time, a
-	// container's Env: is written HERE. Scoped to this deploy's box chain so no foreign candy's
-	// required secret is minted (see config_secret_env.go).
-	if uf, ok, ufErr := loadUnifiedForBox(ctx, ex, c.Box); ufErr == nil && ok && uf != nil {
-		envVars = PodEnvVarsWithSecrets(envVars, uf, dc, c.Box, c.Instance,
-			deploykit.CredentialAccessViaExecutor(ctx, ex))
-	}
 
 	podName := ""
 	if len(resolvedSidecars) > 0 {
