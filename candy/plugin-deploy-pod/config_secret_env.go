@@ -35,6 +35,7 @@ import (
 func boxCandyChain(uf *spec.UnifiedFile, base string) []string {
 	var out []string
 	seen := map[string]bool{}
+	visited := map[string]bool{}
 	for base != "" {
 		bc, ok := spec.BoxConfigFrom(uf.Box, base)
 		if !ok {
@@ -50,9 +51,16 @@ func boxCandyChain(uf *spec.UnifiedFile, base string) []string {
 		if next == "" {
 			next = bc.From
 		}
-		if next == base {
+		// A visited set on BOX NAMES, not on candy names. Tracking candies cannot detect a cycle:
+		// `A -> B -> A` revisits a box whose candies are already in `out`, so the candy-level
+		// `seen` never stops it and `charly config` hangs. `if next == base` catches only the
+		// self-loop `A -> A`. A malformed manifest must fail loudly elsewhere; this walk must
+		// TERMINATE regardless, because a config command that hangs is worse than one that
+		// reports a bad chain.
+		if visited[base] {
 			break
 		}
+		visited[base] = true
 		base = next
 	}
 	return out

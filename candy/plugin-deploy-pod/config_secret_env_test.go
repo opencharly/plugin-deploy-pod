@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/opencharly/sdk/deploykit"
 	"github.com/opencharly/spec/spec"
@@ -318,5 +319,31 @@ func TestDeployCandyChainBoxFirstThenAddCandy(t *testing.T) {
 	want := []string{"shared", "box-only", "overlay"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("the union must be box-first, first-occurrence-wins, empties dropped:\n got %#v\nwant %#v", got, want)
+	}
+}
+
+// TestBoxCandyChainTerminatesOnACycle is the loop's own proof, and it exists because the first
+// version could hang `charly config`.
+//
+// The walk tracked only CANDY names, and its only cycle guard was `if next == base`, which catches
+// the self-loop `A -> A`. A two-box cycle `A -> B -> A` revisits boxes whose candies are already
+// collected, so the candy-level `seen` never fires and the loop spins forever. The gate for a
+// malformed manifest is validation's; THIS function's obligation is to terminate.
+func TestBoxCandyChainTerminatesOnACycle(t *testing.T) {
+	uf := &spec.UnifiedFile{Box: spec.BoxMap{
+		"a": json.RawMessage(`{"candy":["one"],"base":"b"}`),
+		"b": json.RawMessage(`{"candy":["two"],"base":"a"}`),
+	}}
+
+	done := make(chan []string, 1)
+	go func() { done <- boxCandyChain(uf, "a") }()
+	select {
+	case got := <-done:
+		// Both boxes' candies are collected once each, then the walk stops.
+		if len(got) != 2 {
+			t.Fatalf("a cyclic chain must collect each box's candies once and stop, got %#v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("boxCandyChain did not terminate on a cyclic chain: `charly config` would HANG")
 	}
 }
