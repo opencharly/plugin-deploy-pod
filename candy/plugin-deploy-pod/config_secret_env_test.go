@@ -62,7 +62,7 @@ func TestBoxCandyChainWalksBaseAndFrom(t *testing.T) {
 }
 
 // THE GUARD: the box's own required secret is ensured, and the foreign candy's is NOT minted.
-func TestScopedCandySecretsMintsNothingOutsideTheBoxChain(t *testing.T) {
+func TestEnsureBoxChainSecretsMintsNothingOutsideTheBoxChain(t *testing.T) {
 	uf, raw := chainFixture(), candiesFixture()
 	chain := boxCandyChain(uf, "app-box")
 	if len(chain) == 0 {
@@ -145,9 +145,9 @@ func TestBoxCandyChainFollowsBaseAndFrom(t *testing.T) {
 	}
 }
 
-// TestScopedCandySecretsEndToEnd is the test the reviewer asked for: a real authored
+// TestEnsureBoxChainSecretsEndToEnd is the test the reviewer asked for: a real authored
 // `secret_require:` reaching the environment THROUGH THE CHAIN, with a foreign candy proving the
-// scope. The earlier tests drove boxCandyChain and scopedCandySecrets separately; this one runs
+// scope. The earlier tests drove boxCandyChain and ensureBoxChainSecrets separately; this one runs
 // the pair a config write actually runs, so deleting either link fails it.
 //
 // The chain: app-box (candy: [svc], base: base-box) -> base-box (candy: [shared]). Both svc and
@@ -158,7 +158,7 @@ func TestBoxCandyChainFollowsBaseAndFrom(t *testing.T) {
 // value is carried, not that the operator's store works. R8 does not apply: no real service is
 // crossed here, and the store is not mocked as a service — it is a two-function seam whose real
 // implementation is tested by sdk.
-func TestScopedCandySecretsEndToEnd(t *testing.T) {
+func TestEnsureBoxChainSecretsEndToEnd(t *testing.T) {
 	uf := &spec.UnifiedFile{
 		Box: spec.BoxMap{
 			"app-box":  json.RawMessage(`{"candy":["svc"],"base":"base-box"}`),
