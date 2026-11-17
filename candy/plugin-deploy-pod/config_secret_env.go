@@ -122,3 +122,21 @@ func deployBoxBase(uf *spec.UnifiedFile, dc *spec.DeployConfig, box, instance st
 	}
 	return box
 }
+
+// PodEnvVarsWithSecrets is THE envVars build for a pod's config: it takes the env slice assembled so
+// far and returns the same slice with the deploy's box-chain secrets appended. It is named and
+// exported so a test can assert the OUTPUT SLICE -- the very slice that becomes the container's
+// `Env:` -- rather than asserting a helper the caller might not use.
+//
+// The reviewer's ask was precise: deleting the wiring in config_setup.go must fail a test. This
+// function IS that wiring's body, so runConfig's call to it is what the test drives.
+func PodEnvVarsWithSecrets(envVars []string, uf *spec.UnifiedFile, dc *spec.DeployConfig, box, instance string, cred deploykit.CredentialAccess) []string {
+	if uf == nil {
+		return envVars
+	}
+	base := deployBoxBase(uf, dc, box, instance)
+	for k, v := range scopedCandySecrets(uf.Candy, boxCandyChain(uf, base), cred) {
+		envVars = appendEnvUnique(envVars, k+"="+v)
+	}
+	return envVars
+}

@@ -422,10 +422,8 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, s
 	// container's Env: is written HERE. Scoped to this deploy's box chain so no foreign candy's
 	// required secret is minted (see config_secret_env.go).
 	if uf, ok, ufErr := loadUnifiedForBox(ctx, ex, c.Box); ufErr == nil && ok && uf != nil {
-		base := deployBoxBase(uf, dc, c.Box, c.Instance)
-		for k, v := range scopedCandySecrets(uf.Candy, boxCandyChain(uf, base), deploykit.CredentialAccessViaExecutor(ctx, ex)) {
-			envVars = appendEnvUnique(envVars, k+"="+v)
-		}
+		envVars = PodEnvVarsWithSecrets(envVars, uf, dc, c.Box, c.Instance,
+			deploykit.CredentialAccessViaExecutor(ctx, ex))
 	}
 
 	podName := ""

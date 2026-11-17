@@ -7,7 +7,9 @@ package deploypod
 
 import (
 	"encoding/json"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/opencharly/sdk/deploykit"
@@ -196,5 +198,71 @@ func TestScopedCandySecretsEndToEnd(t *testing.T) {
 	// 3. And exactly two reads happened: one per authored dep, no more.
 	if total := resolved["DB_PASSWORD"] + resolved["SHARED_TOKEN"]; total != 2 {
 		t.Fatalf("expected exactly 2 credential reads, got %d (%#v)", total, resolved)
+	}
+}
+
+// TestPodEnvVarsCarriesTheChainsSecret is the test the reviewer asked for twice, and it asserts the
+// EMITTED SLICE -- the exact []string that becomes the container's Env: -- rather than a helper the
+// caller might not use. PodEnvVarsWithSecrets IS the wiring's body in config_setup.go, so removing
+// that call removes the only thing this test drives.
+func TestPodEnvVarsCarriesTheChainsSecret(t *testing.T) {
+	uf := &spec.UnifiedFile{
+		Box: spec.BoxMap{
+			"app-box":  json.RawMessage(`{"candy":["svc"],"base":"base-box"}`),
+			"base-box": json.RawMessage(`{"candy":["shared"]}`),
+		},
+		Candy: map[string]json.RawMessage{
+			"svc":     json.RawMessage(`{"secret_require":[{"name":"DB_PASSWORD","service":"db","key":"pw"}]}`),
+			"shared":  json.RawMessage(`{"secret_require":[{"name":"SHARED_TOKEN","service":"x","key":"y"}]}`),
+			"foreign": json.RawMessage(`{"secret_require":[{"name":"FOREIGN_TOKEN","service":"f","key":"k"}]}`),
+		},
+	}
+	cred := deploykit.CredentialAccess{
+		Resolve: func(envVar, service, key, defaultVal string) (string, string) {
+			return "v-" + envVar, "store"
+		},
+		Write: func(service, key, value string) error { return nil },
+	}
+
+	// A pre-existing env pair must SURVIVE: the build appends, it does not replace.
+	got := PodEnvVarsWithSecrets([]string{"EXISTING=kept"}, uf, nil, "app-box", "", cred)
+
+	joined := strings.Join(got, "\n")
+	if !strings.Contains(joined, "EXISTING=kept") {
+		t.Fatalf("the build must APPEND, not replace; got %#v", got)
+	}
+	if !strings.Contains(joined, "DB_PASSWORD=v-DB_PASSWORD") {
+		t.Fatalf("the emitted Env must carry the leaf candy's secret; got %#v", got)
+	}
+	if !strings.Contains(joined, "SHARED_TOKEN=v-SHARED_TOKEN") {
+		t.Fatalf("the emitted Env must carry the BASE candy's secret; got %#v", got)
+	}
+	if strings.Contains(joined, "FOREIGN_TOKEN") {
+		t.Fatalf("a candy outside the box chain must not reach Env; got %#v", got)
+	}
+}
+
+// TestConfigSetupCallsTheSecretEnvBuild is the CALL-SITE test, and it exists because a behavioural
+// test cannot reach it: PodEnvVarsWithSecrets is correct in isolation whether or not runConfig
+// calls it, and runConfig needs an Executor, a ResolvedRuntime and a podSelection to drive.
+//
+// So the wiring is asserted where it lives -- in the source. This is a weaker proof than executing
+// the path, and it is labelled as such: it fails if the call is DELETED, which is exactly the
+// regression the reviewer named ("delete the 11 wiring lines and every unit test stays green"). It
+// does not prove the call RUNS.
+func TestConfigSetupCallsTheSecretEnvBuild(t *testing.T) {
+	src, err := os.ReadFile("config_setup.go")
+	if err != nil {
+		t.Fatalf("cannot read the config path source: %v", err)
+	}
+	if !strings.Contains(string(src), "PodEnvVarsWithSecrets(") {
+		t.Fatal("config_setup.go no longer calls PodEnvVarsWithSecrets: the config-time secret " +
+			"delivery is unwired, and every behavioural test would still pass -- which is precisely " +
+			"the gap this assertion exists to close")
+	}
+	// And the loader gate must still guard it: an unloaded project delivers nothing, silently.
+	if !strings.Contains(string(src), "loadUnifiedForBox(ctx, ex, c.Box)") {
+		t.Fatal("config_setup.go no longer gates the delivery on loadUnifiedForBox: a failed load " +
+			"would silently deliver no secrets instead of skipping the seam")
 	}
 }

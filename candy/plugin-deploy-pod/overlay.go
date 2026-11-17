@@ -391,9 +391,23 @@ func tagDeployAlias(ctx context.Context, exec *sdk.Executor, reply spec.OverlayB
 // forbids; removing it (plugin-deploy-pod#69) was closed because it broke four measured consumers
 // that read the value from the environment — e.g. `layer-qdrant/charly.yml:34` declares
 // `secret_require: QDRANT__SERVICE__API_KEY` and its service reads `$QDRANT__SERVICE__API_KEY`
-// (`:112`). The delivery contract is that a secret reaches a task as a FILE's content on the venue,
-// never as an environment value, and moving from this call to that one is Wave C's job once the
-// capability-type owner delivers. DO NOT delete this call on its own.
+// (`:112`). D-SEC-1's requirement is that the value does not enter the PLAN -- not that it never
+// reaches the process as a variable. DESIGN.md:387 says a `secret` use delivers BYTES; a process
+// environment variable is one way those bytes arrive, and a file on the venue is another. What the
+// rule forbids is the value being baked into the rendered script at PLAN time, which is what
+// `ts.Op.Env[k] = v` does and what this call therefore has to stop doing.
+//
+// So there are TWO delivery shapes, and they answer different destinations:
+//
+//   - THIS call: a task's Op env, at PLAN time. Its replacement is a FILE on the venue, because a
+//     plan step cannot carry a value without baking it.
+//   - config_setup.go's seam: the container's `Env:`, written HOST-SIDE at CONFIG time. That value
+//     never touches the plan, so it satisfies D-SEC-1 as written. It is not a lesser path; it is the
+//     correct one for a service that reads a variable, which is what all four consumers do.
+//
+// An earlier version of this comment said a secret reaches a task "never as an environment value".
+// That was wrong as a universal claim -- it described THIS path's replacement and read as a rule
+// about all delivery. DO NOT delete this call on its own.
 //
 // What the harness pins, given no candy asks for a secret (the state of the tree: no candy authors
 // `use: secret:`, measured 0), is that the step is a NO-OP: the credential store is never consulted,
