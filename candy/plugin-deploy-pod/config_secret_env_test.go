@@ -67,3 +67,66 @@ func TestScopedCandySecretsMintsNothingOutsideTheBoxChain(t *testing.T) {
 		t.Fatalf("a candy outside the box chain contributed an environment value: %v", got)
 	}
 }
+
+// TestDeployBoxBasePrefersTheDeploysBoxOverItsImage is the ENTRY-POINT test, and it exists because
+// the first version got the precedence backwards: it took `node.Image` as the chain's start
+// whenever it was set, so a REGISTRY deploy (`image: quay.io/fedora/fedora:43`) started the walk
+// from a ref that names no box, found nothing, and silently delivered no secrets -- while its own
+// c.Box named a perfectly good chain.
+//
+// The fixture's deploy KEYS are the box names, because that is how the lookup finds a node at all
+// (deployBoxBase indexes dc.Deploy by DeployKey(box, instance)). An earlier version of this test
+// used unrelated keys, so the lookup missed, every case fell through to `return box`, and the test
+// passed against the INVERTED implementation it was written to catch. A fixture whose keys do not
+// match cannot see the bug.
+func TestDeployBoxBasePrefersTheDeploysBoxOverItsImage(t *testing.T) {
+	uf := &spec.UnifiedFile{Box: spec.BoxMap{
+		"real-box":  json.RawMessage(`{"candy":["svc"]}`),
+		"image-box": json.RawMessage(`{"candy":["other"]}`),
+	}}
+	dc := &spec.DeployConfig{Deploy: map[string]spec.DeployNode{
+		// BOTH are boxes, and they differ. That is the ONLY fixture that can distinguish
+		// "prefers the deploy's box" from "prefers the image": when the image is not a box both
+		// implementations fall through to `box` and agree, which is why two earlier versions of
+		// this test passed against the INVERTED code they were written to catch.
+		"real-box": {Image: "image-box"},
+		// A registry image: not a box, so it can never be the walk's start either way.
+		"registry-box": {Image: "quay.io/fedora/fedora:43"},
+		// The box names nothing; the image does. This is the legitimate fallback.
+		"unknown": {Image: "image-box"},
+	}}
+
+	// 1. THE DISCRIMINATOR: the deploy's own box wins over an image that is also a box.
+	if got := deployBoxBase(uf, dc, "real-box", ""); got != "real-box" {
+		t.Fatalf("the deploy's OWN box must win over an image that is ALSO a box, got %q", got)
+	}
+
+	// 2. A registry image names no box: it can never be the start.
+	if got := deployBoxBase(uf, dc, "registry-box", ""); got != "registry-box" {
+		t.Fatalf("a registry image must never be walked as a box, got %q", got)
+	}
+
+	// 3. A box that names nothing, with an image that IS a box: the image is the fallback.
+	if got := deployBoxBase(uf, dc, "unknown", ""); got != "image-box" {
+		t.Fatalf("an image that names a box is the fallback, got %q", got)
+	}
+
+	// 4. A nil deploy config must not panic and must return the box.
+	if got := deployBoxBase(uf, nil, "real-box", ""); got != "real-box" {
+		t.Fatalf("a nil deploy config must return the box, got %q", got)
+	}
+}
+
+// TestBoxCandyChainFollowsBaseAndFrom is the walk itself: box -> base, first occurrence wins.
+func TestBoxCandyChainFollowsBaseAndFrom(t *testing.T) {
+	uf := &spec.UnifiedFile{Box: spec.BoxMap{
+		"leaf": json.RawMessage(`{"candy":["svc","shared"],"base":"mid"}`),
+		"mid":  json.RawMessage(`{"candy":["shared","kernel"],"from":"root"}`),
+		"root": json.RawMessage(`{"candy":["base-candy"]}`),
+	}}
+	got := boxCandyChain(uf, "leaf")
+	want := []string{"svc", "shared", "kernel", "base-candy"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("the chain must walk base then from, first occurrence winning:\n got %#v\nwant %#v", got, want)
+	}
+}

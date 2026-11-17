@@ -97,3 +97,28 @@ func scopedCandySecrets(raw map[string]json.RawMessage, chain []string, cred dep
 	}
 	return out
 }
+
+// deployBoxBase answers ONE question: which box's candy chain belongs to this deploy? The
+// deploy's own box first -- `box` is definitionally a box name, and the caller resolved the
+// project with it. `node.Image` is the image the deploy runs, and for a BOX-based deploy it
+// names a box (check-pod-overlay's `image: check-k8s-deploy-app` is a box), but for a registry
+// deploy it is a ref like `quay.io/fedora/fedora:43` that names no box at all.
+//
+// Preferring Image made a registry deploy's chain EMPTY instead of falling back to its box --
+// invisible in a box-based bed, which is why it needed its own test rather than a bed.
+func deployBoxBase(uf *spec.UnifiedFile, dc *spec.DeployConfig, box, instance string) string {
+	if _, isBox := spec.BoxConfigFrom(uf.Box, box); isBox {
+		return box
+	}
+	if dc == nil {
+		return box
+	}
+	node, found := dc.Deploy[spec.DeployKey(box, instance)]
+	if !found || node.Image == "" {
+		return box
+	}
+	if _, imageIsBox := spec.BoxConfigFrom(uf.Box, node.Image); imageIsBox {
+		return node.Image
+	}
+	return box
+}
