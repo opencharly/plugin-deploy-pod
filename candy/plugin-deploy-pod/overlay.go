@@ -72,20 +72,13 @@ func buildOverlay(ctx context.Context, exec *sdk.Executor, reply spec.OverlayBui
 		return "", fmt.Errorf("overlay render: %w", err)
 	}
 
-	// Resolve the overlay candies' secret_requires:/secret_accepts: env PLUGIN-SIDE + inject it
-	// into the plans' TaskSteps before oci.Emit walks them (#55 coneB-br2 — the α cluster
-	// relocated host-side from charly/enc.go + charly/layer_secrets.go + charly/build_overlay.go,
-	// which are DELETED in that cutover). This mirrors candy/plugin-deploy/secrets_artifacts.go's
-	// injectCandySecrets exactly: the candy set is dg.Candies (the resolved-project envelope's
-	// candy models — deploykit.CandyModel is a spec.CandyReader alias, so it passes directly to
-	// SelectCandiesForPlans); the credential access is the shared
-	// deploykit.CredentialAccessViaExecutor (verb:credential = candy/plugin-secrets over the
-	// reverse channel — the SAME store the former host coreCredentialAccess reached via
-	// ResolveCredential/DefaultCredentialStore). Byte-identical to the former host-side
-	// resolveCandySecrets → deploykit.ResolveSecretForC candy → deploykit.InjectSecretsIntoPlans.
-	candyList := deploykit.SelectCandiesForPlans(plans, dg.Candies)
-	secretEnv := deploykit.ResolveSecretForCandy(candyList, deploykit.CredentialAccessViaExecutor(ctx, exec))
-	deploykit.InjectSecretsIntoPlans(plans, secretEnv)
+	// Secrets are NOT resolved into env here. A `use: secret:` entry is a FILE delivery (D-SEC-1:
+	// "a value reaches a consumer as a `secret:` need, never as text"), and the plan the host
+	// hands this overlay already carries the `File` step that performs it: BuildDeployPlan compiles
+	// one `FileStep{Source, Dest, Mode: 0600}` per entry (sdk/deploykit/compile_secret_steps.go),
+	// kit.walkFile reads the host source at realize, and DeployExecutor.PutFile writes it into the
+	// venue. Injecting the VALUE into a TaskStep's env — what this overlay used to do — put it in
+	// the IR, the ledger and the rendered script, which is exactly what D-SEC-1 forbids.
 
 	overlayCandies := collectOverlayCandies(plans)
 
