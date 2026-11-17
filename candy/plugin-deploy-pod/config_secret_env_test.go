@@ -43,6 +43,17 @@ func mintRecorder(minted map[string]string) deploykit.CredentialAccess {
 	}
 }
 
+// containsSecretName reports whether the ensure returned `name`. The seam hands back NAMES, so this
+// is the whole of what a caller can observe — there is no value to assert on, by design.
+func containsSecretName(names []string, name string) bool {
+	for _, n := range names {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
 // The walk: box → base → roots, first-occurrence-wins, and NO foreign name.
 func TestBoxCandyChainWalksBaseAndFrom(t *testing.T) {
 	if got, want := boxCandyChain(chainFixture(), "app-box"), []string{"svc", "shared", "kernel"}; !reflect.DeepEqual(got, want) {
@@ -50,7 +61,7 @@ func TestBoxCandyChainWalksBaseAndFrom(t *testing.T) {
 	}
 }
 
-// THE GUARD: the box's own required secret is resolved, and the foreign candy's is NOT minted.
+// THE GUARD: the box's own required secret is ensured, and the foreign candy's is NOT minted.
 func TestScopedCandySecretsMintsNothingOutsideTheBoxChain(t *testing.T) {
 	uf, raw := chainFixture(), candiesFixture()
 	chain := boxCandyChain(uf, "app-box")
@@ -58,16 +69,16 @@ func TestScopedCandySecretsMintsNothingOutsideTheBoxChain(t *testing.T) {
 		t.Fatal("fixture: the chain is empty, so the guard below would prove nothing")
 	}
 	minted := map[string]string{}
-	got := scopedCandySecrets(raw, chain, mintRecorder(minted))
+	got := ensureBoxChainSecrets(raw, chain, mintRecorder(minted))
 
-	if got["SVC_TOKEN"] == "" {
-		t.Fatalf("the box's own required secret was not resolved: got %v — the seam exists to deliver it", got)
+	if !containsSecretName(got, "SVC_TOKEN") {
+		t.Fatalf("the box's own required secret was not ensured: got %v — the seam exists to ensure it", got)
 	}
 	if _, bad := minted["FOREIGN_TOKEN"]; bad {
 		t.Fatalf("a candy OUTSIDE the box chain minted a credential (key FOREIGN_TOKEN, value %q): an unscoped resolve writes secrets into the operator's store that no deploy asked for", minted["FOREIGN_TOKEN"])
 	}
-	if _, bad := got["FOREIGN_TOKEN"]; bad {
-		t.Fatalf("a candy outside the box chain contributed an environment value: %v", got)
+	if containsSecretName(got, "FOREIGN_TOKEN") {
+		t.Fatalf("a candy outside the box chain contributed a name: %v", got)
 	}
 }
 
@@ -172,24 +183,20 @@ func TestScopedCandySecretsEndToEnd(t *testing.T) {
 		},
 	}
 
-	got := scopedCandySecrets(uf.Candy, boxCandyChain(uf, "app-box"), cred)
+	got := ensureBoxChainSecrets(uf.Candy, boxCandyChain(uf, "app-box"), cred)
 
-	// 1. Both chain levels deliver, at the authored env-var name.
-	//
-	// The VALUE is what the fake returns for the argument it is handed, and that argument is the
-	// dep's NAME -- not its authored key. Written as "value-of-"+key originally, this assertion
-	// caught its own wrong assumption: the seam asks the store for (envVar, service, key) and
-	// EnsureCandySecret owns that coordinate, so this file must not care which of the three the
-	// store keys on. Asserting the value's identity is enough.
-	if got["DB_PASSWORD"] != "value-of-DB_PASSWORD" {
-		t.Fatalf("the leaf box's candy must deliver DB_PASSWORD, got %#v", got)
+	// 1. Both chain levels are ENSURED, by NAME. The seam returns NAMES only (D-SEC-1: a value must
+	// reach neither `state` nor the caller), so the value's absence is not this test's to assert --
+	// TestTheRenderedUnitCarriesTheSecretReferenceAndNoValue owns that half.
+	if !containsSecretName(got, "DB_PASSWORD") {
+		t.Fatalf("the leaf box's candy must ensure DB_PASSWORD, got %#v", got)
 	}
-	if got["SHARED_TOKEN"] != "value-of-SHARED_TOKEN" {
-		t.Fatalf("the BASE box's candy must deliver SHARED_TOKEN, got %#v", got)
+	if !containsSecretName(got, "SHARED_TOKEN") {
+		t.Fatalf("the BASE box's candy must ensure SHARED_TOKEN, got %#v", got)
 	}
 
 	// 2. The scope holds: the foreign candy is in neither level, so nothing was read for it.
-	if _, found := got["FOREIGN_TOKEN"]; found {
+	if containsSecretName(got, "FOREIGN_TOKEN") {
 		t.Fatalf("a candy outside the box chain must contribute nothing, got %#v", got)
 	}
 	if resolved["FOREIGN_TOKEN"] != 0 {
@@ -202,11 +209,10 @@ func TestScopedCandySecretsEndToEnd(t *testing.T) {
 	}
 }
 
-// TestPodEnvVarsCarriesTheChainsSecret is the test the reviewer asked for twice, and it asserts the
-// EMITTED SLICE -- the exact []string that becomes the container's Env: -- rather than a helper the
-// caller might not use. PodEnvVarsWithSecrets IS the wiring's body in config_setup.go, so removing
-// that call removes the only thing this test drives.
-func TestPodEnvVarsCarriesTheChainsSecret(t *testing.T) {
+// TestEnsureBoxChainSecretsNamesTheChainsSecrets asserts the seam's OUTPUT: the NAMES it ensured, and
+// never a value. It replaced a test that asserted the value's presence in the env slice — which was
+// the D-SEC-1 `state` leak, not the property (the unit's `Environment=` line is state).
+func TestEnsureBoxChainSecretsNamesTheChainsSecrets(t *testing.T) {
 	uf := &spec.UnifiedFile{
 		Box: spec.BoxMap{
 			"app-box":  json.RawMessage(`{"candy":["svc"],"base":"base-box"}`),
@@ -225,58 +231,72 @@ func TestPodEnvVarsCarriesTheChainsSecret(t *testing.T) {
 		Write: func(service, key, value string) error { return nil },
 	}
 
-	// A pre-existing env pair must SURVIVE: the build appends, it does not replace.
-	got := PodEnvVarsWithSecrets([]string{"EXISTING=kept"}, uf, nil, "app-box", "", cred)
+	got := EnsureBoxChainSecrets(uf, nil, "app-box", "", cred)
 
-	joined := strings.Join(got, "\n")
-	if !strings.Contains(joined, "EXISTING=kept") {
-		t.Fatalf("the build must APPEND, not replace; got %#v", got)
+	for _, want := range []string{"DB_PASSWORD", "SHARED_TOKEN"} {
+		if !containsSecretName(got, want) {
+			t.Fatalf("the box chain's %s was not ensured; got %#v", want, got)
+		}
 	}
-	if !strings.Contains(joined, "DB_PASSWORD=v-DB_PASSWORD") {
-		t.Fatalf("the emitted Env must carry the leaf candy's secret; got %#v", got)
+	if containsSecretName(got, "FOREIGN_TOKEN") {
+		t.Fatalf("a candy outside the box chain must not be ensured; got %#v", got)
 	}
-	if !strings.Contains(joined, "SHARED_TOKEN=v-SHARED_TOKEN") {
-		t.Fatalf("the emitted Env must carry the BASE candy's secret; got %#v", got)
-	}
-	if strings.Contains(joined, "FOREIGN_TOKEN") {
-		t.Fatalf("a candy outside the box chain must not reach Env; got %#v", got)
+	// The seam's whole point: it hands back NAMES, so a caller has no value to write into state.
+	for _, n := range got {
+		if strings.Contains(n, "=") || strings.Contains(n, "v-") {
+			t.Fatalf("the seam returned a VALUE (%q); D-SEC-1 forbids one leaving the store here", n)
+		}
 	}
 }
 
-// TestConfigSetupCallsTheSecretEnvBuild is the CALL-SITE test, and it exists because a behavioural
-// test cannot reach it: PodEnvVarsWithSecrets is correct in isolation whether or not runConfig
-// calls it, and runConfig needs an Executor, a ResolvedRuntime and a podSelection to drive.
+// TestConfigSetupCallsTheSecretEnsure is the CALL-SITE test, and it exists because a behavioural test
+// cannot reach it: the ensure is correct in isolation whether or not runConfig calls it, and runConfig
+// needs an Executor, a ResolvedRuntime and a podSelection to drive.
 //
-// So the wiring is asserted where it lives -- in the source. This is a weaker proof than executing
-// the path, and it is labelled as such: it fails if the call is DELETED, which is exactly the
-// regression the reviewer named ("delete the 11 wiring lines and every unit test stays green"). It
-// does not prove the call RUNS.
-func TestConfigSetupCallsTheSecretEnvBuild(t *testing.T) {
+// It is asserted where it lives -- in the source -- and labelled as the weaker proof it is: it fails
+// if the call is DELETED. It also pins the ORDER (before provisioning) and the ABSENCE of the retired
+// env write, since either regression silently reverts the D-SEC-1 `state` fix.
+func TestConfigSetupCallsTheSecretEnsure(t *testing.T) {
 	src, err := os.ReadFile("config_setup.go")
 	if err != nil {
 		t.Fatalf("cannot read the config path source: %v", err)
 	}
-	if !strings.Contains(string(src), "PodEnvVarsWithSecrets(") {
-		t.Fatal("config_setup.go no longer calls PodEnvVarsWithSecrets: the config-time secret " +
-			"delivery is unwired, and every behavioural test would still pass -- which is precisely " +
-			"the gap this assertion exists to close")
+	body := string(src)
+	ensureAt := strings.Index(body, "EnsureBoxChainSecrets(")
+	if ensureAt < 0 {
+		t.Fatal("config_setup.go no longer calls EnsureBoxChainSecrets: a required secret missing " +
+			"everywhere would fail the config instead of being minted, and every behavioural test " +
+			"would still pass -- precisely the gap this assertion exists to close")
 	}
-	// And the loader gate must still guard it: an unloaded project delivers nothing, silently.
-	if !strings.Contains(string(src), "loadUnifiedForBox(ctx, ex, c.Box)") {
-		t.Fatal("config_setup.go no longer gates the delivery on loadUnifiedForBox: a failed load " +
-			"would silently deliver no secrets instead of skipping the seam")
+	provisionAt := strings.Index(body, "resolvePodProvisionSecrets(")
+	if provisionAt < 0 {
+		t.Fatal("config_setup.go no longer provisions the podman secrets: the unit's Secret= reference " +
+			"would name a secret that does not exist")
+	}
+	if ensureAt > provisionAt {
+		t.Fatal("EnsureBoxChainSecrets runs AFTER resolvePodProvisionSecrets: a value minted on the " +
+			"first `charly config` would not be the one provisioned, so the container gets no secret")
+	}
+	if strings.Contains(body, "PodEnvVarsWithSecrets(") {
+		t.Fatal("config_setup.go still writes secret VALUES into the container's Env:, which is `state` " +
+			"(D-SEC-1); the unit may carry only the podman-secret reference")
+	}
+	// And the loader gate must still guard it: an unloaded project ensures nothing, silently.
+	if !strings.Contains(body, "loadUnifiedForBox(ctx, ex, c.Box)") {
+		t.Fatal("config_setup.go no longer gates the ensure on loadUnifiedForBox: a failed load " +
+			"would silently ensure no secrets instead of skipping the seam")
 	}
 }
 
-// TestPodEnvVarsCarriesAnAddCandySecret is D-CAP-6's own fixture, and it is the one a bed CANNOT give
-// us: a candy that exists ONLY in the deploy's `add_candy:` overlay -- in neither box level -- must
-// still deliver its secret, because "the needs and uses of a deployment are the union of those of the
-// deployment, its box and ALL THEIR CANDIES" (DESIGN.md:695).
+// TestEnsureBoxChainSecretsCarriesAnAddCandySecret is D-CAP-6's own fixture, and it is the one a bed
+// CANNOT give us: a candy that exists ONLY in the deploy's `add_candy:` overlay -- in neither box
+// level -- must still be ensured, because "the needs and uses of a deployment are the union of those
+// of the deployment, its box and ALL THEIR CANDIES" (DESIGN.md:695).
 //
 // The discriminating shape, learned the hard way: the overlay candy must be reachable ONLY through
 // add_candy. If it were also in the box chain, both implementations would agree and the fixture could
 // not see the bug -- the same reason three earlier precedence tests passed against inverted code.
-func TestPodEnvVarsCarriesAnAddCandySecret(t *testing.T) {
+func TestEnsureBoxChainSecretsCarriesAnAddCandySecret(t *testing.T) {
 	uf := &spec.UnifiedFile{
 		Box: spec.BoxMap{
 			"app-box": json.RawMessage(`{"candy":["box-candy"]}`),
@@ -296,16 +316,16 @@ func TestPodEnvVarsCarriesAnAddCandySecret(t *testing.T) {
 		Write:   func(service, key, value string) error { return nil },
 	}
 
-	got := strings.Join(PodEnvVarsWithSecrets(nil, uf, dc, "app-box", "", cred), "\n")
+	got := EnsureBoxChainSecrets(uf, dc, "app-box", "", cred)
 
-	if !strings.Contains(got, "BOX_TOKEN=v-BOX_TOKEN") {
-		t.Fatalf("the box chain's candy must still deliver; got %q", got)
+	if !containsSecretName(got, "BOX_TOKEN") {
+		t.Fatalf("the box chain's candy must still be ensured; got %#v", got)
 	}
-	if !strings.Contains(got, "OVERLAY_TOKEN=v-OVERLAY_TOKEN") {
-		t.Fatalf("an `add_candy:` candy IS one of the deployment's candies (D-CAP-6) and must deliver; got %q", got)
+	if !containsSecretName(got, "OVERLAY_TOKEN") {
+		t.Fatalf("an `add_candy:` candy IS one of the deployment's candies (D-CAP-6) and must be ensured; got %#v", got)
 	}
-	if strings.Contains(got, "UNRELATED_TOKEN") {
-		t.Fatalf("a candy in neither the box chain nor add_candy must contribute nothing; got %q", got)
+	if containsSecretName(got, "UNRELATED_TOKEN") {
+		t.Fatalf("a candy in neither the box chain nor add_candy must contribute nothing; got %#v", got)
 	}
 }
 
