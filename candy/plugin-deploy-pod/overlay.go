@@ -401,9 +401,17 @@ func tagDeployAlias(ctx context.Context, exec *sdk.Executor, reply spec.OverlayB
 //
 //   - THIS call: a task's Op env, at PLAN time. Its replacement is a FILE on the venue, because a
 //     plan step cannot carry a value without baking it.
+//
 //   - config_setup.go's seam: the container's `Env:`, written HOST-SIDE at CONFIG time. That value
-//     never touches the plan, so it satisfies D-SEC-1 as written. It is not a lesser path; it is the
-//     correct one for a service that reads a variable, which is what all four consumers do.
+//     never touches the PLAN. It does NOT satisfy D-SEC-1 on its own, and this comment must not say it
+//     does: D-SEC-1 lists "the store, artifacts, labels, the IR, STATE or output", `state` separately
+//     from the IR, and the config writer PERSISTS `Environment=` into the deployment's unit. So the
+//     seam narrows exposure from plan + state to state, and stops there.
+//
+//     The contract's answer is that what enters state is a HANDLE, not a value: `#BindOutput.binding`
+//     is `#Opaque` and "core never inspects it" (spec/schema/bind.cue:48-52), delivered at REALIZE by
+//     the type owner's `bind` (DESIGN.md:685). Until that owner exists, this seam is an ORDERING step
+//     toward it -- never a compliance claim.
 //
 // An earlier version of this comment said a secret reaches a task "never as an environment value".
 // That was wrong as a universal claim -- it described THIS path's replacement and read as a rule
