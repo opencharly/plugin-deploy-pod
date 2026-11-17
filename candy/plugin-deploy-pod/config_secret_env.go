@@ -135,8 +135,39 @@ func PodEnvVarsWithSecrets(envVars []string, uf *spec.UnifiedFile, dc *spec.Depl
 		return envVars
 	}
 	base := deployBoxBase(uf, dc, box, instance)
-	for k, v := range scopedCandySecrets(uf.Candy, boxCandyChain(uf, base), cred) {
+	var addCandy []string
+	if dc != nil {
+		if node, found := dc.Deploy[spec.DeployKey(box, instance)]; found {
+			addCandy = node.AddCandy
+		}
+	}
+	for k, v := range scopedCandySecrets(uf.Candy, DeployCandyChain(uf, base, addCandy), cred) {
 		envVars = appendEnvUnique(envVars, k+"="+v)
 	}
 	return envVars
+}
+
+// DeployCandyChain is D-CAP-6's UNION: "The needs and uses of a deployment are the union of those of
+// the DEPLOYMENT, its box and ALL THEIR CANDIES" (DESIGN.md:695). An `add_candy:` candy IS one of the
+// deployment's candies -- it runs in the container and can author `secret_require:` -- so a chain that
+// walked only `uf.Box` would under-resolve a deployment using the overlay idiom this project's own pod
+// bed (`check-pod-overlay`) actually uses.
+//
+// ORDER: the box chain first, then the deploy's `add_candy:` list, first-occurrence-wins. The box is the
+// image the overlay rides ON, so where a candy appears in both, the box's reading of it wins -- the
+// overlay names a candy, it does not re-define one.
+func DeployCandyChain(uf *spec.UnifiedFile, base string, addCandy []string) []string {
+	out := boxCandyChain(uf, base)
+	seen := make(map[string]bool, len(out))
+	for _, name := range out {
+		seen[name] = true
+	}
+	for _, name := range addCandy {
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
 }

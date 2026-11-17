@@ -266,3 +266,57 @@ func TestConfigSetupCallsTheSecretEnvBuild(t *testing.T) {
 			"would silently deliver no secrets instead of skipping the seam")
 	}
 }
+
+// TestPodEnvVarsCarriesAnAddCandySecret is D-CAP-6's own fixture, and it is the one a bed CANNOT give
+// us: a candy that exists ONLY in the deploy's `add_candy:` overlay -- in neither box level -- must
+// still deliver its secret, because "the needs and uses of a deployment are the union of those of the
+// deployment, its box and ALL THEIR CANDIES" (DESIGN.md:695).
+//
+// The discriminating shape, learned the hard way: the overlay candy must be reachable ONLY through
+// add_candy. If it were also in the box chain, both implementations would agree and the fixture could
+// not see the bug -- the same reason three earlier precedence tests passed against inverted code.
+func TestPodEnvVarsCarriesAnAddCandySecret(t *testing.T) {
+	uf := &spec.UnifiedFile{
+		Box: spec.BoxMap{
+			"app-box": json.RawMessage(`{"candy":["box-candy"]}`),
+		},
+		Candy: map[string]json.RawMessage{
+			"box-candy": json.RawMessage(`{"secret_require":[{"name":"BOX_TOKEN","service":"b","key":"b"}]}`),
+			"overlay":   json.RawMessage(`{"secret_require":[{"name":"OVERLAY_TOKEN","service":"o","key":"o"}]}`),
+			"unrelated": json.RawMessage(`{"secret_require":[{"name":"UNRELATED_TOKEN","service":"u","key":"u"}]}`),
+		},
+	}
+	// The deploy carries `overlay` via add_candy and nothing else.
+	dc := &spec.DeployConfig{Deploy: map[string]spec.DeployNode{
+		"app-box": {AddCandy: []spec.CandyRef{"overlay"}},
+	}}
+	cred := deploykit.CredentialAccess{
+		Resolve: func(envVar, service, key, defaultVal string) (string, string) { return "v-" + envVar, "store" },
+		Write:   func(service, key, value string) error { return nil },
+	}
+
+	got := strings.Join(PodEnvVarsWithSecrets(nil, uf, dc, "app-box", "", cred), "\n")
+
+	if !strings.Contains(got, "BOX_TOKEN=v-BOX_TOKEN") {
+		t.Fatalf("the box chain's candy must still deliver; got %q", got)
+	}
+	if !strings.Contains(got, "OVERLAY_TOKEN=v-OVERLAY_TOKEN") {
+		t.Fatalf("an `add_candy:` candy IS one of the deployment's candies (D-CAP-6) and must deliver; got %q", got)
+	}
+	if strings.Contains(got, "UNRELATED_TOKEN") {
+		t.Fatalf("a candy in neither the box chain nor add_candy must contribute nothing; got %q", got)
+	}
+}
+
+// TestDeployCandyChainBoxFirstThenAddCandy pins the ORDER: where a candy appears in both, the box's
+// reading wins and it appears once.
+func TestDeployCandyChainBoxFirstThenAddCandy(t *testing.T) {
+	uf := &spec.UnifiedFile{Box: spec.BoxMap{
+		"app-box": json.RawMessage(`{"candy":["shared","box-only"]}`),
+	}}
+	got := DeployCandyChain(uf, "app-box", []string{"overlay", "shared", ""})
+	want := []string{"shared", "box-only", "overlay"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("the union must be box-first, first-occurrence-wins, empties dropped:\n got %#v\nwant %#v", got, want)
+	}
+}
