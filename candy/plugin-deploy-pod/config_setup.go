@@ -417,6 +417,20 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, s
 	}
 	envVars = mergeEnvSlices(envVars, c.Env)
 
+	// CONFIG-TIME secret delivery (D-SEC-1): the values reach the venue's environment from the
+	// credential store, host-side, and never through the plan — `Op.Env` is baked at PLAN time, a
+	// container's Env: is written HERE. Scoped to this deploy's box chain so no foreign candy's
+	// required secret is minted (see config_secret_env.go).
+	if uf, ok, ufErr := loadUnifiedForBox(ctx, ex, c.Box); ufErr == nil && ok && uf != nil {
+		base := c.Box
+		if node, found := dc.Deploy[spec.DeployKey(c.Box, c.Instance)]; found && node.Image != "" {
+			base = node.Image
+		}
+		for k, v := range scopedCandySecrets(uf.Candy, boxCandyChain(uf, base), deploykit.CredentialAccessViaExecutor(ctx, ex)) {
+			envVars = appendEnvUnique(envVars, k+"="+v)
+		}
+	}
+
 	podName := ""
 	if len(resolvedSidecars) > 0 {
 		podName = kit.PodNameInstance(c.Box, c.Instance)
