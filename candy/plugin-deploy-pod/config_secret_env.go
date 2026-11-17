@@ -3,10 +3,21 @@ package deploypod
 // config_secret_env.go — the CONFIG-TIME half of secret delivery (D-SEC-1), and the box scoping that
 // makes it safe.
 //
-// THE PROPERTY: `Op.Env` is baked into the rendered script at PLAN time; a container's `Env:` is
-// written at CONFIG time, host-side. The same secret can reach the process either way, but only one
-// of those paths puts it in the IR. This file is the config-time path: the value goes from the
-// credential store into `config_setup.go`'s `envVars`, and no plan is in scope.
+// THE PROPERTY, and it is D-SEC-1's `state` limb rather than its IR limb: a value that reaches a
+// container through the container's `Env:` is WRITTEN DOWN — the unit file is state, and the config
+// writer persists `Environment=NAME=value` into it. DESIGN.md:2511 forbids exactly that. So this file
+// no longer carries a value anywhere:
+//
+//   - It ENSURES the deploy box chain's required secret EXISTS in the credential store (minting one
+//     when a `secret_require:` is missing everywhere — the documented auto-generation), and returns
+//     the NAMES it ensured.
+//   - DELIVERY is the podman-secret reference the image's own label already supplies:
+//     `CollectCandySecretAccepts` reads `meta.SecretRequire`, `ProvisionPodmanSecrets` creates the
+//     podman secret, and the unit carries `Secret=<name>,type=env,target=<VAR>`. Podman resolves the
+//     value at REALIZE, so the unit holds a NAME and the process still sees the variable.
+//
+// The ensure runs BEFORE provisioning (see the call site) so a value minted on this very first
+// config is the one provisioned.
 //
 // THE HAZARD THIS FILE EXISTS TO NOT MINT: `EnsureCandySecret` (the shared coordinate rule) GENERATES
 // AND PERSISTS a 32-byte token for a required dep that is missing everywhere. Calling it for every
@@ -66,8 +77,9 @@ func boxCandyChain(uf *spec.UnifiedFile, base string) []string {
 	return out
 }
 
-// scopedCandySecrets resolves the secrets of the NAMED candies only, and returns them as the
-// environment pairs the container is configured with. `raw` is `uf.Candy` (name -> authored body).
+// ensureBoxChainSecrets ensures the secrets of the NAMED candies only, and returns the NAMES it
+// ensured — never a value (D-SEC-1: a value must not enter state, and the caller can only put what
+// it is handed into state). `raw` is `uf.Candy` (name -> authored body).
 //
 // The body is decoded into spec.Candy -- the TYPED model -- not into a local struct with
 // json:"secret_require" tags. A hand-written mirror of two schema fields is a second copy of the
@@ -81,8 +93,8 @@ func boxCandyChain(uf *spec.UnifiedFile, base string) []string {
 // The resolution itself is `deploykit.EnsureCandySecret`, the SHARED function `ResolveSecretForCandy`
 // calls per dep (it owns the `<service>/<key>` coordinate rule -- the predicate opencharly/sdk#52 and
 // opencharly/pod-openwebui#19 both drifted from). This file decides WHICH candies, never HOW.
-func scopedCandySecrets(raw map[string]json.RawMessage, chain []string, cred deploykit.CredentialAccess) map[string]string {
-	out := map[string]string{}
+func ensureBoxChainSecrets(raw map[string]json.RawMessage, chain []string, cred deploykit.CredentialAccess) []string {
+	var out []string
 	for _, name := range chain {
 		body, ok := raw[name]
 		if !ok {
@@ -94,12 +106,12 @@ func scopedCandySecrets(raw map[string]json.RawMessage, chain []string, cred dep
 		}
 		for _, dep := range deps.SecretRequire {
 			if v, _ := deploykit.EnsureCandySecret(dep, true, cred); v != "" {
-				out[dep.Name] = v
+				out = append(out, dep.Name)
 			}
 		}
 		for _, dep := range deps.SecretAccept {
 			if v, _ := deploykit.EnsureCandySecret(dep, false, cred); v != "" {
-				out[dep.Name] = v
+				out = append(out, dep.Name)
 			}
 		}
 	}
@@ -131,16 +143,14 @@ func deployBoxBase(uf *spec.UnifiedFile, dc *spec.DeployConfig, box, instance st
 	return box
 }
 
-// PodEnvVarsWithSecrets is THE envVars build for a pod's config: it takes the env slice assembled so
-// far and returns the same slice with the deploy's box-chain secrets appended. It is named and
-// exported so a test can assert the OUTPUT SLICE -- the very slice that becomes the container's
-// `Env:` -- rather than asserting a helper the caller might not use.
-//
-// The reviewer's ask was precise: deleting the wiring in config_setup.go must fail a test. This
-// function IS that wiring's body, so runConfig's call to it is what the test drives.
-func PodEnvVarsWithSecrets(envVars []string, uf *spec.UnifiedFile, dc *spec.DeployConfig, box, instance string, cred deploykit.CredentialAccess) []string {
+// EnsureBoxChainSecrets is THE ensure for a pod's config: it makes the deploy's box-chain required
+// secrets exist in the credential store and returns the NAMES it ensured. It takes NO env slice and
+// returns no value, because the container's `Env:` is state (D-SEC-1) and the reference the unit
+// carries is the podman secret's NAME. Exported so a test can drive the box chain and the scope
+// guard; the values themselves never leave the store.
+func EnsureBoxChainSecrets(uf *spec.UnifiedFile, dc *spec.DeployConfig, box, instance string, cred deploykit.CredentialAccess) []string {
 	if uf == nil {
-		return envVars
+		return nil
 	}
 	base := deployBoxBase(uf, dc, box, instance)
 	var addCandy []string
@@ -149,10 +159,7 @@ func PodEnvVarsWithSecrets(envVars []string, uf *spec.UnifiedFile, dc *spec.Depl
 			addCandy = node.AddCandy
 		}
 	}
-	for k, v := range scopedCandySecrets(uf.Candy, DeployCandyChain(uf, base, addCandy), cred) {
-		envVars = appendEnvUnique(envVars, k+"="+v)
-	}
-	return envVars
+	return ensureBoxChainSecrets(uf.Candy, DeployCandyChain(uf, base, addCandy), cred)
 }
 
 // DeployCandyChain is D-CAP-6's UNION: "The needs and uses of a deployment are the union of those of
