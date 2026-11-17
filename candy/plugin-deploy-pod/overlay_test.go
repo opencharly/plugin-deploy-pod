@@ -232,7 +232,16 @@ func TestDeliverSecretEnvIsANoOpWhenNoCandyAsks(t *testing.T) {
 		consulted = true
 		return secretContents, "test"
 	}}
-	deliverSecretEnv(plans, map[string]spec.CandyReader{}, cred)
+	// The candy EXISTS and a plan references it, so `SelectCandiesForPlans` really selects it and
+	// `ResolveSecretForCandy` really walks it — the only thing absent is a `use: secret:` author,
+	// which is the tree's state. An empty map would short-circuit the selection and prove nothing.
+	candies := map[string]spec.CandyReader{
+		"svc-secret": deploykit.NewSpecCandyModel(spec.CandyModel{Name: "svc-secret"}, spec.CandyView{}),
+	}
+	if got := deploykit.SelectCandiesForPlans(plans, candies); len(got) != 1 {
+		t.Fatalf("fixture: the selected candy set = %d, want 1 — the test must exercise the selection, not skip it", len(got))
+	}
+	deliverSecretEnv(plans, candies, cred)
 	if consulted {
 		t.Fatalf("the credential store was consulted although no candy asks for a secret (D-SEC-1: ask nothing, hold nothing)")
 	}
