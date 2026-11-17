@@ -58,20 +58,20 @@ func boxCandyChain(uf *spec.UnifiedFile, base string) []string {
 	return out
 }
 
-// candySecretDeps is the only part of a candy body this file reads: its two authored secret lists.
-type candySecretDeps struct {
-	SecretRequire []spec.EnvDependency `json:"secret_require"`
-	SecretAccept  []spec.EnvDependency `json:"secret_accept"`
-}
-
 // scopedCandySecrets resolves the secrets of the NAMED candies only, and returns them as the
-// environment pairs the container is configured with. `raw` is `uf.Candy` (name → authored body).
+// environment pairs the container is configured with. `raw` is `uf.Candy` (name -> authored body).
 //
-// A name in `chain` that has no authored body is skipped: the box chain can name a candy the unified
-// file does not carry inline, and inventing a body for it is how a mint would happen.
+// The body is decoded into spec.Candy -- the TYPED model -- not into a local struct with
+// json:"secret_require" tags. A hand-written mirror of two schema fields is a second copy of the
+// contract that drifts the moment the schema grows a third (SDD: Go is generated, never
+// hand-transcribed). spec.Candy already carries SecretRequire and SecretAccept, both
+// []spec.EnvDependency.
+//
+// A name in `chain` that has no authored body is skipped: the box chain can name a candy the
+// unified file does not carry inline, and inventing a body for it is how a mint would happen.
 //
 // The resolution itself is `deploykit.EnsureCandySecret`, the SHARED function `ResolveSecretForCandy`
-// calls per dep (it owns the `<service>/<key>` coordinate rule — the predicate opencharly/sdk#526 and
+// calls per dep (it owns the `<service>/<key>` coordinate rule -- the predicate opencharly/sdk#52 and
 // opencharly/pod-openwebui#19 both drifted from). This file decides WHICH candies, never HOW.
 func scopedCandySecrets(raw map[string]json.RawMessage, chain []string, cred deploykit.CredentialAccess) map[string]string {
 	out := map[string]string{}
@@ -80,7 +80,7 @@ func scopedCandySecrets(raw map[string]json.RawMessage, chain []string, cred dep
 		if !ok {
 			continue
 		}
-		var deps candySecretDeps
+		var deps spec.Candy // the TYPED model -- never a hand-written mirror of its fields
 		if err := json.Unmarshal(body, &deps); err != nil {
 			continue
 		}

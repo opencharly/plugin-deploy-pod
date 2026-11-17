@@ -130,3 +130,71 @@ func TestBoxCandyChainFollowsBaseAndFrom(t *testing.T) {
 		t.Fatalf("the chain must walk base then from, first occurrence winning:\n got %#v\nwant %#v", got, want)
 	}
 }
+
+// TestScopedCandySecretsEndToEnd is the test the reviewer asked for: a real authored
+// `secret_require:` reaching the environment THROUGH THE CHAIN, with a foreign candy proving the
+// scope. The earlier tests drove boxCandyChain and scopedCandySecrets separately; this one runs
+// the pair a config write actually runs, so deleting either link fails it.
+//
+// The chain: app-box (candy: [svc], base: base-box) -> base-box (candy: [shared]). Both svc and
+// shared author a required secret; foreign is a third candy in NEITHER level and must contribute
+// nothing — that is EnsureCandySecret's auto-generation not being reached.
+//
+// The credential accessor is a FAKE, because this asserts WHICH candies are resolved and HOW the
+// value is carried, not that the operator's store works. R8 does not apply: no real service is
+// crossed here, and the store is not mocked as a service — it is a two-function seam whose real
+// implementation is tested by sdk.
+func TestScopedCandySecretsEndToEnd(t *testing.T) {
+	uf := &spec.UnifiedFile{
+		Box: spec.BoxMap{
+			"app-box":  json.RawMessage(`{"candy":["svc"],"base":"base-box"}`),
+			"base-box": json.RawMessage(`{"candy":["shared"]}`),
+		},
+		Candy: map[string]json.RawMessage{
+			"svc":     json.RawMessage(`{"secret_require":[{"name":"DB_PASSWORD","service":"db","key":"pw"}]}`),
+			"shared":  json.RawMessage(`{"secret_require":[{"name":"SHARED_TOKEN","service":"x","key":"y"}]}`),
+			"foreign": json.RawMessage(`{"secret_require":[{"name":"FOREIGN_TOKEN","service":"f","key":"k"}]}`),
+		},
+	}
+
+	resolved := map[string]int{}
+	cred := deploykit.CredentialAccess{
+		Resolve: func(envVar, service, key, defaultVal string) (string, string) {
+			resolved[envVar]++
+			return "value-of-" + key, "store"
+		},
+		Write: func(service, key, value string) error {
+			t.Fatalf("no candy in this chain may MINT a credential; got Write(%q,%q)", service, key)
+			return nil
+		},
+	}
+
+	got := scopedCandySecrets(uf.Candy, boxCandyChain(uf, "app-box"), cred)
+
+	// 1. Both chain levels deliver, at the authored env-var name.
+	//
+	// The VALUE is what the fake returns for the argument it is handed, and that argument is the
+	// dep's NAME -- not its authored key. Written as "value-of-"+key originally, this assertion
+	// caught its own wrong assumption: the seam asks the store for (envVar, service, key) and
+	// EnsureCandySecret owns that coordinate, so this file must not care which of the three the
+	// store keys on. Asserting the value's identity is enough.
+	if got["DB_PASSWORD"] != "value-of-DB_PASSWORD" {
+		t.Fatalf("the leaf box's candy must deliver DB_PASSWORD, got %#v", got)
+	}
+	if got["SHARED_TOKEN"] != "value-of-SHARED_TOKEN" {
+		t.Fatalf("the BASE box's candy must deliver SHARED_TOKEN, got %#v", got)
+	}
+
+	// 2. The scope holds: the foreign candy is in neither level, so nothing was read for it.
+	if _, found := got["FOREIGN_TOKEN"]; found {
+		t.Fatalf("a candy outside the box chain must contribute nothing, got %#v", got)
+	}
+	if resolved["FOREIGN_TOKEN"] != 0 {
+		t.Fatalf("a foreign candy must not even be LOOKED UP, got %d reads", resolved["FOREIGN_TOKEN"])
+	}
+
+	// 3. And exactly two reads happened: one per authored dep, no more.
+	if total := resolved["DB_PASSWORD"] + resolved["SHARED_TOKEN"]; total != 2 {
+		t.Fatalf("expected exactly 2 credential reads, got %d (%#v)", total, resolved)
+	}
+}
