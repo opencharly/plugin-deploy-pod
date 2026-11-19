@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/opencharly/sdk/deploykit"
-	"github.com/opencharly/spec/spec"
+	"github.com/opencharly/sdk/vmshared"
 )
 
 // volume_root_test.go — guards the named-volume root reconcile (volume_root.go).
@@ -144,36 +144,52 @@ func TestVolumeRootReconcileArgsIsShellSafe(t *testing.T) {
 // standard-mapping helper could only write an owner that runtime could not use.
 //
 // The assertion is equality against the emitters' own output, not against a retyped table, so a
-// condition that moves on either side fails here: the two argv builders call the capability
-// fact (engineKeepID) directly, and the quadlet emitter lives in sdk (which cannot import this
-// package) so its mirror is compared against the renderer's real output. Nothing is left to
-// drift.
+// condition that moves on either side fails here: the argv builders ask podUserNSFor (the
+// resolved-deploy decision over the capability facts) directly, and the quadlet emitter lives in
+// sdk (which cannot import this package) so its mirror is compared against the renderer's real
+// output. Nothing is left to drift.
+//
+// The GPU rows are the opencharly/plugin-deploy-pod#81 half: a deploy that carries the CDI device
+// emits keep-id from NONE of the emitters, which is what makes the reconcile run for it.
 func TestVolumeRootKeepIDCoversEveryEmitter(t *testing.T) {
 	for _, tc := range []struct {
 		name, engine string
 		uid, binds   int
+		gpu, priv    bool
 	}{
-		{"podman, runtime user, no bind mounts", "podman", 1000, 0},
-		{"podman, runtime user, bind mounts", "podman", 1000, 1},
-		{"podman, container root, bind mounts", "podman", 0, 1},
-		{"docker, runtime user, bind mounts", "docker", 1000, 1},
-		{"containerd, runtime user, bind mounts", "containerd", 1000, 1},
-		{"docker, container root, bind mounts", "docker", 0, 1},
+		{name: "podman, runtime user, no bind mounts", engine: "podman", uid: 1000, binds: 0},
+		{name: "podman, runtime user, bind mounts", engine: "podman", uid: 1000, binds: 1},
+		{name: "podman, container root, bind mounts", engine: "podman", uid: 0, binds: 1},
+		{name: "docker, runtime user, bind mounts", engine: "docker", uid: 1000, binds: 1},
+		{name: "containerd, runtime user, bind mounts", engine: "containerd", uid: 1000, binds: 1},
+		{name: "docker, container root, bind mounts", engine: "docker", uid: 0, binds: 1},
+		// The CDI-device rows: no emitter may emit keep-id.
+		{name: "podman, cdi device, bind mounts", engine: "podman", uid: 1000, binds: 1, gpu: true},
+		{name: "podman, cdi device, no bind mounts", engine: "podman", uid: 1000, binds: 0, gpu: true},
+		// A privileged unit gets every device through --privileged and never receives a CDI
+		// mount, so it keeps the mapping it had.
+		{name: "podman, privileged gpu, bind mounts", engine: "podman", uid: 1000, binds: 1, gpu: true, priv: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			binds := make([]deploykit.ResolvedBindMount, tc.binds)
 			qcfg := deploykit.QuadletConfig{
 				BoxName: "box", Instance: "inst", ImageRef: "img",
-				UID: tc.uid, GID: tc.uid, BindMounts: binds,
+				UID: tc.uid, GID: tc.uid, BindMounts: binds, GPU: tc.gpu,
+				Security: vmshared.SecurityConfig{Privileged: tc.priv},
 			}
 
 			quadletEmits := strings.Contains(deploykit.GenerateQuadlet(qcfg), "UserNS=keep-id")
-			if got := volumeRootKeepID("quadlet", tc.engine, tc.binds); got != quadletEmits {
-				t.Errorf("quadlet mode: volumeRootKeepID = %v but GenerateQuadlet emits keep-id = %v", got, quadletEmits)
+			// A QUADLET run is podman by construction, so the renderer's answer is comparable only
+			// on the podman rows — but on those it must be the SAME answer the argv emitters give,
+			// for every row including the privileged one.
+			if tc.engine == "podman" {
+				if got := volumeRootKeepID(tc.engine, tc.binds, tc.gpu, tc.priv); got != quadletEmits {
+					t.Errorf("quadlet: volumeRootKeepID = %v but GenerateQuadlet emits keep-id = %v", got, quadletEmits)
+				}
 			}
 
 			// Direct mode has TWO container creators, and either may be the one that runs.
-			// Both now build through the engine start_plan body, so both consult engineKeepID.
+			// Both build through the engine start_plan body, so both ask podUserNSFor.
 			sel := selectionForTest(t, deploykit.Selection{}, tc.engine)
 			directArgv, err := directRunArgs(qcfg, binds, sel)
 			if err != nil {
@@ -181,22 +197,52 @@ func TestVolumeRootKeepIDCoversEveryEmitter(t *testing.T) {
 			}
 			directEmits := hasKeepID(directArgv)
 			startArgv, err := buildStartArgs(sel, "img", tc.uid, tc.uid, nil, "ctr", nil, binds,
-				false, "", nil, spec.SecurityConfig{}, nil, "/")
+				tc.gpu, "", nil, vmshared.SecurityConfig{Privileged: tc.priv}, nil, "/")
 			if err != nil {
 				t.Fatalf("buildStartArgs(%s): %v", tc.engine, err)
 			}
 			startEmits := hasKeepID(startArgv)
-			if want := directEmits || startEmits; volumeRootKeepID("direct", tc.engine, tc.binds) != want {
-				t.Errorf("direct mode: volumeRootKeepID = %v but directRunArgs emits keep-id = %v and buildStartArgs = %v",
-					volumeRootKeepID("direct", tc.engine, tc.binds), directEmits, startEmits)
+			if want := directEmits || startEmits; volumeRootKeepID(tc.engine, tc.binds, tc.gpu, tc.priv) != want {
+				t.Errorf("volumeRootKeepID = %v but directRunArgs emits keep-id = %v and buildStartArgs = %v",
+					volumeRootKeepID(tc.engine, tc.binds, tc.gpu, tc.priv), directEmits, startEmits)
 			}
 
 			// buildShellArgs is the transient `charly run` twin of buildStartArgs and attaches the
 			// same named volumes; it carries the same condition, so it must agree with it.
 			shell := hasKeepID(buildShellArgs(sel.Target, "img", tc.uid, tc.uid, nil, nil, binds,
-				false, "", "", nil, spec.SecurityConfig{}, "/", true))
+				tc.gpu, "", "", nil, vmshared.SecurityConfig{Privileged: tc.priv}, "/", true))
 			if shell != startEmits {
 				t.Errorf("buildShellArgs emits keep-id = %v but buildStartArgs = %v", shell, startEmits)
+			}
+
+			// THE CROSS-EMITTER AGREEMENT, on EVERY row and with no skip: the three argv builders
+			// must answer the keep-id question identically, and on a podman row the quadlet
+			// renderer must answer it the same way too. This is the assertion a divergent
+			// predicate cannot survive — a skipped row is how the privileged divergence shipped.
+			if directEmits != startEmits || shell != startEmits {
+				t.Errorf("argv emitters disagree on keep-id: directRunArgs=%v buildStartArgs=%v buildShellArgs=%v",
+					directEmits, startEmits, shell)
+			}
+			if tc.engine == "podman" && quadletEmits != startEmits {
+				t.Errorf("argv and quadlet disagree on keep-id: GenerateQuadlet=%v buildStartArgs=%v",
+					quadletEmits, startEmits)
+			}
+			// And a deploy that carries the CDI device is emitted with NO keep-id mapping by ANY
+			// emitter — the point of opencharly/plugin-deploy-pod#81.
+			if tc.gpu && !tc.priv {
+				for _, e := range []struct {
+					name string
+					got  bool
+				}{
+					{"GenerateQuadlet", quadletEmits},
+					{"directRunArgs", directEmits},
+					{"buildStartArgs", startEmits},
+					{"buildShellArgs", shell},
+				} {
+					if e.got {
+						t.Errorf("%s emits keep-id for a deploy that carries the CDI device", e.name)
+					}
+				}
 			}
 		})
 	}

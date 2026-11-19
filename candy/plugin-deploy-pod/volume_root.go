@@ -37,18 +37,11 @@ import (
 // is the only thing this helper touches.
 const volumeRootScratchPath = "/charly-volume-root"
 
-// Three different emitters can create the container a deploy's named volumes are attached to, and
-// each guards its own keep-id flag. These are their conditions, each named for its emitter; the
-// direct/start builders call engineKeepID (the capability fact) directly, so they cannot drift,
-// and the quadlet emitter — sdk/deploykit/quadlet.go's `UserNS=` line, which cannot import this
-// package — is mirrored here and pinned by a test.
-
-// quadletKeepID mirrors sdk/deploykit/quadlet.go's `UserNS=keep-id:uid=…,gid=…` line: a quadlet
-// deploy is podman-only, so the emitter tests neither the engine nor the deploy user, only whether
-// any bind mount exists.
-func quadletKeepID(bindMounts int) bool {
-	return bindMounts > 0
-}
+// Every emitter that can create the deploy's container — the engine `start_plan` argv, `charly
+// shell`, `charly exec`, and the quadlet renderer in sdk — decides the user-namespace mapping with
+// the SAME predicate, podUserNSFor (engine_ops.go). The quadlet renderer cannot import this
+// package, so its arm is not re-stated here: the drift guard in volume_root_test.go compares this
+// decision against `deploykit.GenerateQuadlet`'s real output for every row.
 
 // volumeRootKeepID reports whether this deploy's runtime container is emitted with
 // `--userns=keep-id:uid=<uid>,gid=<gid>`, by ANY emitter that could create it. Under keep-id the
@@ -57,14 +50,10 @@ func quadletKeepID(bindMounts int) bool {
 // that from its own standard-mapping helper — where that same host user appears as container root —
 // so it steps aside rather than write an owner the keep-id runtime could not use.
 //
-// The direct and systemd-unit modes both launch through the engine `start_plan` body, so their
-// keep-id answer IS the capability fact (engineKeepID). Quadlet is the one emitter with its own
-// generator and its own condition.
-func volumeRootKeepID(runMode, engine string, bindMounts int) bool {
-	if runMode == "quadlet" {
-		return quadletKeepID(bindMounts)
-	}
-	return engineKeepID(engine, bindMounts)
+// It IS the one decision, not a copy of it: a quadlet run mode resolves to podman, which is what
+// `engine` already names, so no per-mode branch is needed.
+func volumeRootKeepID(engine string, bindMounts int, gpu, privileged bool) bool {
+	return podUserNSFor(engine, gpu, privileged, bindMounts).keepID()
 }
 
 // volumeRootReconcileArgs builds the argv of the throwaway container that gives one named volume a
