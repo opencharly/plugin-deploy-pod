@@ -68,7 +68,8 @@ func resolvePodShellPlan(ctx context.Context, ex *sdk.Executor, box, instance st
 	if containerRunningLocal(sel.Target, name) {
 		execEnv := append(append([]string{}, envVars...), agentFwd.Env...)
 		workDir := deploykit.ResolveWorkingDir(volumes, bindMounts, home, box, instance)
-		argv := buildExecArgs(sel.Target, name, uid, gid, command, execEnv, workDir, opts.Interactive)
+		userNS := podUserNSFor(string(sel.Engine), detected.GPU, len(bindMounts))
+		argv := buildExecArgs(sel.Target, name, uid, gid, userNS, command, execEnv, workDir, opts.Interactive)
 		return &spec.PodLiveStdioPlan{Script: hostAttachScript(argv, opts.WrapPTY)}, nil
 	}
 
@@ -191,10 +192,18 @@ func buildShellArgs(target deploykit.ContainerdTarget, imageRef string, uid, gid
 	if interactive {
 		interactiveFlag = "-it"
 	}
+	// The user-namespace mapping decides the USER too: under userns=host the deploy's own uid
+	// maps to a subuid and cannot write the host-owned bind, so the transient container runs as
+	// container root — the same mapping the emitted unit carries (engine_ops.go, podUserNSFor).
+	userNS := podUserNSFor(engine, gpu, len(bindMounts))
+	user := fmt.Sprintf("%d:%d", uid, gid)
+	if userNS.hostRoot() {
+		user = containerRootUser
+	}
 	args := []string{
 		binary, "run", "--rm", interactiveFlag,
 		"-w", workingDir,
-		"--user", fmt.Sprintf("%d:%d", uid, gid),
+		"--user", user,
 	}
 	if len(network) > 0 && network[0] != "" {
 		args = append(args, "--network", network[0])
@@ -219,8 +228,11 @@ func buildShellArgs(target deploykit.ContainerdTarget, imageRef string, uid, gid
 			args = append(args, "-v", m)
 		}
 	}
-	if engineKeepID(engine, len(bindMounts)) {
+	switch {
+	case userNS.keepID():
 		args = append(args, fmt.Sprintf("--userns=keep-id:uid=%d,gid=%d", uid, gid))
+	case userNS.hostRoot():
+		args = append(args, "--userns=host")
 	}
 	args = append(args, envArgs(envVars)...)
 	args = append(args, "--entrypoint", "bash", imageRef)
@@ -231,15 +243,22 @@ func buildShellArgs(target deploykit.ContainerdTarget, imageRef string, uid, gid
 }
 
 // buildExecArgs constructs the `<engine> exec -it|-i …` list for attaching to a running container.
-func buildExecArgs(target deploykit.ContainerdTarget, name string, uid, gid int, command string, envVars []string, workingDir string, interactive bool) []string {
+func buildExecArgs(target deploykit.ContainerdTarget, name string, uid, gid int, userNS podUserNS, command string, envVars []string, workingDir string, interactive bool) []string {
 	binary := kit.EngineBinary(string(target.Engine))
 	interactiveFlag := "-i"
 	if interactive {
 		interactiveFlag = "-it"
 	}
+	// An attach must use the SAME workload user the container was created with: a CDI deploy
+	// runs as container root, and demoting the attach to the deploy's uid would leave it unable
+	// to write the bind the deploy exists for.
+	user := fmt.Sprintf("%d:%d", uid, gid)
+	if userNS.hostRoot() {
+		user = containerRootUser
+	}
 	args := []string{
 		binary, "exec", interactiveFlag,
-		"--user", fmt.Sprintf("%d:%d", uid, gid),
+		"--user", user,
 		"-w", workingDir,
 	}
 	args = append(args, envArgs(envVars)...)

@@ -50,7 +50,7 @@ func writeSystemdUnitConfig(rt *kit.ResolvedRuntime, sel podSelection, qcfg depl
 		WorkingDir: workingDir,
 		Hostname:   name,
 		Detach:     false,
-		KeepID:     engineKeepID(engine, len(bindMounts)),
+		UserNS:     podUserNSFor(engine, qcfg.GPU, len(bindMounts)),
 		UID:        qcfg.UID,
 		GID:        qcfg.GID,
 		Ports:      localizedPorts(qcfg.Ports, qcfg.BindAddress),

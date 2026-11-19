@@ -167,7 +167,7 @@ func TestBuildShellArgsWithCommandAndGPU(t *testing.T) {
 }
 
 func TestBuildExecArgs(t *testing.T) {
-	args := buildExecArgs(targetForTest(t, "docker"), "charly-fedora", 1000, 1000, "", nil, "/workspace", true)
+	args := buildExecArgs(targetForTest(t, "docker"), "charly-fedora", 1000, 1000, userNSImageOwn, "", nil, "/workspace", true)
 	want := []string{
 		"docker", "exec", "-it",
 		"--user", "1000:1000",
@@ -181,7 +181,7 @@ func TestBuildExecArgs(t *testing.T) {
 }
 
 func TestBuildExecArgsWithCommand(t *testing.T) {
-	args := buildExecArgs(targetForTest(t, "docker"), "charly-openclaw", 1000, 1000, "echo hello", nil, "/workspace", false)
+	args := buildExecArgs(targetForTest(t, "docker"), "charly-openclaw", 1000, 1000, userNSImageOwn, "echo hello", nil, "/workspace", false)
 	want := []string{
 		"docker", "exec", "-i",
 		"--user", "1000:1000",
@@ -211,7 +211,7 @@ func TestBuildShellArgsWithCommandTTY(t *testing.T) {
 }
 
 func TestBuildExecArgsWithCommandTTY(t *testing.T) {
-	args := buildExecArgs(targetForTest(t, "docker"), "charly-openclaw", 1000, 1000, "openclaw tui", nil, "/workspace", true)
+	args := buildExecArgs(targetForTest(t, "docker"), "charly-openclaw", 1000, 1000, userNSImageOwn, "openclaw tui", nil, "/workspace", true)
 	want := []string{
 		"docker", "exec", "-it",
 		"--user", "1000:1000",
@@ -243,7 +243,7 @@ func TestBuildShellArgsForceTTY(t *testing.T) {
 }
 
 func TestBuildExecArgsForceTTY(t *testing.T) {
-	args := buildExecArgs(targetForTest(t, "docker"), "charly-openclaw", 1000, 1000, "openclaw models auth login", nil, "/workspace", true)
+	args := buildExecArgs(targetForTest(t, "docker"), "charly-openclaw", 1000, 1000, userNSImageOwn, "openclaw models auth login", nil, "/workspace", true)
 	want := []string{
 		"docker", "exec", "-it",
 		"--user", "1000:1000",
@@ -258,7 +258,7 @@ func TestBuildExecArgsForceTTY(t *testing.T) {
 }
 
 func TestBuildExecArgsCustomUIDGID(t *testing.T) {
-	args := buildExecArgs(targetForTest(t, "podman"), "charly-ubuntu", 1001, 1002, "", nil, "/workspace", true)
+	args := buildExecArgs(targetForTest(t, "podman"), "charly-ubuntu", 1001, 1002, userNSImageOwn, "", nil, "/workspace", true)
 	want := []string{
 		"podman", "exec", "-it",
 		"--user", "1001:1002",
@@ -367,7 +367,7 @@ func TestBuildShellArgsWithCapAdd(t *testing.T) {
 
 func TestBuildExecArgsWithEnvVars(t *testing.T) {
 	envVars := []string{"FOO=bar"}
-	args := buildExecArgs(targetForTest(t, "docker"), "charly-myapp", 1000, 1000, "", envVars, "/workspace", true)
+	args := buildExecArgs(targetForTest(t, "docker"), "charly-myapp", 1000, 1000, userNSImageOwn, "", envVars, "/workspace", true)
 	want := []string{
 		"docker", "exec", "-it",
 		"--user", "1000:1000",

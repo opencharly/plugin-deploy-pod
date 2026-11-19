@@ -231,3 +231,137 @@ check-pod-secret-diagnostic:
                       echo "arm B: a readable store was reported unreadable"; cat "$LOG.b"; exit 1; fi
                     cat "$LOG"
                     echo PD-SECRET-DIAG-OK
+
+
+# ---------------------------------------------------------------------------
+# THE R10 BED for opencharly/plugin-deploy-pod#81.
+#
+# WHY THIS BED EXISTS: a pod deploy that carries a CDI GPU device AND a bind volume could not
+# START. `keep-id` was emitted for any bind mount, and crun cannot apply the CDI device's ~62 FILE
+# mounts inside a keep-id user namespace, so the container died at the first one
+# (`mount_setattr /usr/bin/nvidia-cuda-mps-control: Operation not permitted: OCI permission
+# denied`, exit 126). The fix: a deploy that carries the CDI device runs `userns=host` with the
+# workload as container root, and a bind-only deploy keeps `keep-id` unchanged.
+#
+# THE SUBJECT must carry BOTH facts, so the entity is a pod deploy with a bind volume on a host
+# that has a GPU (the device is the host's own detection, not a config field) — and it must be
+# `disposable: true`, because the step rebuilds it with `charly update` and destroys it afterwards.
+#
+# THIS BED ASSERTS THE EMITTED ARTEFACT, not a code path: the .container quadlet's `UserNS=`/`User=`
+# lines are read from disk, `charly start` is required to succeed, and the bind's writability is
+# proven by a `touch` from inside the container plus the file's host-side ownership. The `update`
+# rebuild half is the R10 fresh rebuild: the unit is destroyed, regenerated from a fresh resolve and
+# the container recreated, and the same assertions must hold again.
+# ---------------------------------------------------------------------------
+pod-cdi-keepid-bind:
+    pod:
+        image: ghcr.io/opencharly/arch:2026.323.1515
+        disposable: true
+        volume:
+            - name: probe
+              type: bind
+              host: /tmp/charly-cdi-keepid-bind
+              path: /data
+
+pod-cdi-keepid-template:
+    local:
+        description: |-
+            Minimal kind:local template for the CDI+bind user-namespace bed: composes THIS repo's
+            out-of-tree `plugin-deploy-pod` candy so the host builds the plugin from this worktree,
+            and carries no plan — the checks live on the deploy that composes it.
+        candy:
+            - plugin-deploy-pod
+
+check-pod-cdi-userns:
+    local:
+        from: pod-cdi-keepid-template
+        host: local
+        disposable: true
+        lifecycle: test
+        plan:
+            - check: a pod deploy carrying a CDI GPU device and a bind volume emits userns=host with
+                  the workload as container root (never keep-id), starts, and leaves the bind writable
+                  with the file owned by the host user — and the same holds after the quadlet is
+                  destroyed and regenerated from a fresh resolve
+              id: pc-userns-host-root
+              context: [runtime]
+              timeout: 1800s
+              exit_status: 0
+              stdout:
+                contains: PC-USERNS-OK
+              command:
+                in_container: false
+                command: |
+                    set -eu
+                    NAME=pod-cdi-keepid-bind
+                    BIND=/tmp/charly-cdi-keepid-bind
+                    UNIT=$HOME/.config/containers/systemd/charly-$NAME.container
+                    LOG="$PWD/.check/pod-cdi-userns.log"; mkdir -p "$(dirname "$LOG")"
+                    arms() {
+                    echo "== the binary under test is ${CHARLY_BIN} ($(${CHARLY_BIN} version 2>/dev/null | tail -1))"
+                    rm -rf "$BIND"; mkdir -p "$BIND"
+                    echo "== config: write the quadlet from the resolved deploy"
+                    ${CHARLY_BIN} config "$NAME" > "$LOG.cfg" 2>&1; cfgrc=$?
+                    grep -Ev '^plugin ' "$LOG.cfg" | tail -12 || true
+                    echo "== charly config rc=$cfgrc"
+                    [ "$cfgrc" = "0" ] || { echo "charly config failed ($cfgrc)"; exit 1; }
+                    echo "== the emitted unit's user-namespace and user lines"
+                    grep -E '^(AddDevice|UserNS|User)=' "$UNIT" || true
+                    echo "== start"
+                    ${CHARLY_BIN} start "$NAME" > "$LOG.start" 2>&1; startrc=$?
+                    grep -Ev '^plugin ' "$LOG.start" | tail -12 || true
+                    echo "== charly start rc=$startrc"
+                    [ "$startrc" = "0" ] || { echo "charly start failed ($startrc) on a CDI+bind deploy"; exit 1; }
+                    echo "== write the bind from INSIDE the container"
+                    ${CHARLY_BIN} cmd "$NAME" "touch /data/probe && ls -ln /data" > "$LOG.cmd" 2>&1; cmdrc=$?
+                    grep -Ev '^plugin ' "$LOG.cmd" | tail -12 || true
+                    echo "== charly cmd rc=$cmdrc"
+                    [ "$cmdrc" = "0" ] || { echo "the bind is not writable from inside the container ($cmdrc)"; exit 1; }
+                    echo "== the file on the HOST"
+                    ls -ln "$BIND" || true
+                    # FRESH REBUILD. `charly update` is the verb this leg wants, and it cannot run
+                    # here: its re-add step routes the deploy's `image:` (a fully-qualified registry
+                    # ref) through the box/candy resolver, which fails in a project that declares no
+                    # box of that name (opencharly/plugin-fleet#<TBD>, filed from this cutover). For a
+                    # quadlet deploy whose image needs no rebuild, update IS destroy -> regenerate ->
+                    # start, which is exactly the sequence driven here with the charly verbs.
+                    echo "== fresh rebuild: remove -> config -> start"
+                    ${CHARLY_BIN} remove "$NAME" > "$LOG.upd" 2>&1; updrc=$?
+                    grep -Ev '^plugin ' "$LOG.upd" | tail -8 || true
+                    echo "== charly remove rc=$updrc"
+                    [ "$updrc" = "0" ] || { echo "destroy failed ($updrc)"; exit 1; }
+                    rm -f "$BIND"/probe*
+                    ${CHARLY_BIN} config "$NAME" >> "$LOG.upd" 2>&1; cfg2rc=$?
+                    ${CHARLY_BIN} start "$NAME" >> "$LOG.upd" 2>&1; start2rc=$?
+                    grep -Ev '^plugin ' "$LOG.upd" | tail -12 || true
+                    echo "== charly config (2) rc=$cfg2rc, charly start (2) rc=$start2rc"
+                    [ "$cfg2rc" = "0" ] && [ "$start2rc" = "0" ] || { echo "the rebuilt deploy did not start (config $cfg2rc, start $start2rc)"; exit 1; }
+                    echo "== the re-emitted unit, and the bind after the rebuild"
+                    grep -E '^(AddDevice|UserNS|User)=' "$UNIT" || true
+                    ${CHARLY_BIN} cmd "$NAME" "touch /data/probe-after-update && ls -ln /data" > "$LOG.cmd2" 2>&1; cmd2rc=$?
+                    grep -Ev '^plugin ' "$LOG.cmd2" | tail -12 || true
+                    echo "== charly cmd (after rebuild) rc=$cmd2rc"
+                    [ "$cmd2rc" = "0" ] || { echo "the bind is not writable after the rebuild ($cmd2rc)"; exit 1; }
+                    ls -ln "$BIND" || true
+                    echo "== PC-USERNS-OK"
+                    }
+                    if arms >"$LOG" 2>&1; then :; else rc=$?; cat "$LOG"; exit $rc; fi
+                    # THE UNIT CARRIES THE DEVICE: without it the user-namespace question is moot, and a
+                    # green "no keep-id" would prove nothing about this change.
+                    grep -q '^AddDevice=nvidia.com/gpu=all$' "$UNIT" || { echo "the subject unit does not carry the CDI device"; cat "$LOG"; exit 1; }
+                    # AND THE MAPPING IS THE FIXED ONE, in the emitted artefact.
+                    grep -q '^UserNS=host$' "$UNIT" || { echo "the emitted unit does not run userns=host"; cat "$LOG"; exit 1; }
+                    grep -q '^User=0:0$' "$UNIT" || { echo "the emitted unit does not run the workload as container root"; cat "$LOG"; exit 1; }
+                    if grep -q '^UserNS=keep-id' "$UNIT"; then
+                      echo "the emitted unit still carries a keep-id mapping"; cat "$LOG"; exit 1; fi
+                    # THE BIND IS WRITABLE AND THE FILE IS THE HOST USER'S, after BOTH the start and the
+                    # fresh rebuild (the two cmd arms above returned 0).
+                    grep -q 'probe$' "$LOG.cmd" || { echo "no touch evidence from inside the container"; cat "$LOG"; exit 1; }
+                    grep -q 'probe-after-update$' "$LOG.cmd2" || { echo "no touch evidence after the rebuild"; cat "$LOG"; exit 1; }
+                    OWNED=$(ls -ln "$BIND" | awk '$NF ~ /^probe/ {print $3" "$4; exit}')
+                    echo "== host owner of the file written by the container: $OWNED"
+                    [ "$OWNED" = "$(id -u) $(id -g)" ] || { echo "the file is not owned by the host user: $OWNED"; cat "$LOG"; exit 1; }
+                    # NO LEAK: a CDI pod left running would hold the GPU.
+                    ${CHARLY_BIN} remove "$NAME" > "$LOG.rm" 2>&1 || { echo "cleanup failed"; tail -12 "$LOG.rm"; exit 1; }
+                    tail -60 "$LOG"
+                    echo PC-USERNS-OK

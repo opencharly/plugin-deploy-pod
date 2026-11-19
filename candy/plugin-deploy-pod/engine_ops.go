@@ -33,7 +33,7 @@ type podEngineRun struct {
 	Restart    string
 	Detach     bool
 	Remove     bool
-	KeepID     bool
+	UserNS     podUserNS
 	UID        int
 	GID        int
 	Ports      []string
@@ -83,7 +83,7 @@ func engineRunArgv(target deploykit.ContainerdTarget, r podEngineRun) ([]string,
 			extra = append(extra, "-v", m)
 		}
 	}
-	if c.SupportsUsernsKeepID && c.UsernsKeepIDArg != "" && r.KeepID {
+	if r.UserNS.keepID() && c.SupportsUsernsKeepID && c.UsernsKeepIDArg != "" {
 		// The spec body's keep-id arm appends the bare UsernsKeepIDArg; the pods need the
 		// uid/gid mapping, so the full spelling is emitted here from the SAME capability fact.
 		extra = append(extra, fmt.Sprintf("%s:uid=%d,gid=%d", c.UsernsKeepIDArg, r.UID, r.GID))
@@ -104,6 +104,13 @@ func engineRunArgv(target deploykit.ContainerdTarget, r podEngineRun) ([]string,
 		EnvFiles:  r.EnvFiles,
 		ExtraArgs: extra,
 		ImageArgs: r.Entrypoint,
+	}
+	// The host/container-root mapping is a REQUEST fact, not an ExtraArgs string: the engine's
+	// start_plan body owns the spelling of `--userns host` and `--user`, so a second spelling
+	// here could drift from the engine it is launched on.
+	if r.UserNS.hostRoot() {
+		req.UsernsHost = true
+		req.WorkloadUser = containerRootUser
 	}
 	params, err := json.Marshal(req)
 	if err != nil {
@@ -275,11 +282,62 @@ func engineUnitFiles(engine string, req spec.EngineUnitRequest) (map[string]stri
 	return rep.Files, nil
 }
 
-// engineKeepID reports whether an engine's launch maps the invoking user into the container
-// for host-identical bind mounts. It is the capability fact, not an engine-name switch.
-func engineKeepID(engine string, bindMounts int) bool {
+// podUserNS is the ONE decision about a pod's user-namespace mapping. Every emitter that can
+// create the deploy's container — the engine `start_plan` argv (direct run, `charly start`,
+// systemd-unit), `charly shell`/`charly exec`, and the quadlet renderer in sdk (mirrored, see
+// volume_root.go) — asks this predicate, so the argv and the emitted unit cannot disagree.
+type podUserNS int
+
+const (
+	// userNSImageOwn leaves the mapping alone: no flag, and the workload runs as the image's own
+	// USER inside whatever user namespace the engine applies by default.
+	userNSImageOwn podUserNS = iota
+	// userNSKeepID is `--userns=keep-id:uid=<uid>,gid=<gid>` / `UserNS=keep-id:…`: the invoking
+	// user is mapped into the container, so a host-owned bind mount stays writable by the
+	// deploy's own uid.
+	userNSKeepID
+	// userNSHostRoot is `--userns=host` with the workload as CONTAINER ROOT. A deploy that
+	// carries a CDI GPU device must not use keep-id: crun cannot apply the device's ~62 FILE
+	// mounts inside a keep-id user namespace, and the container dies at the first one —
+	// `mount_setattr /usr/bin/nvidia-cuda-mps-control: Operation not permitted: OCI permission
+	// denied`, exit 126 (opencharly/plugin-deploy-pod#81). userns=host with the workload as
+	// container root is the ONE mapping under which a host-owned bind stays writable AND the
+	// device resolves; in a rootless pod that "root" is still the unprivileged host user, so the
+	// files the workload creates land owned by that user (measured: `ls -ln` shows 1000 1000).
+	userNSHostRoot
+)
+
+// containerRootUser is the workload user spelling for userNSHostRoot. Both ids are named: the
+// bind's files must land with the host user's uid AND gid, and podman's `--user 0` alone leaves
+// the gid to the image's own declaration.
+const containerRootUser = "0:0"
+
+// keepID reports whether this mapping is the keep-id one.
+func (m podUserNS) keepID() bool { return m == userNSKeepID }
+
+// hostRoot reports whether this mapping is userns=host with the workload as container root.
+func (m podUserNS) hostRoot() bool { return m == userNSHostRoot }
+
+// podUserNSFor decides the mapping from the RESOLVED deploy (does it carry a CDI device? does it
+// have a host-owned bind mount?) and the engine's capability facts — never from an engine name and
+// never from a second hand-maintained list of "GPU deploys".
+//
+// keep-id exists to make a host-owned bind writable, so it is only ever in play when a bind mount
+// exists; a deploy with no bind mount keeps the mapping it has today (measured: `--device` alone
+// starts, and the CDI mounts apply fine under the default mapping). A bind-only deploy keeps
+// keep-id EXACTLY as it is today — nothing about it changes.
+func podUserNSFor(engine string, gpu bool, bindMounts int) podUserNS {
+	if bindMounts == 0 {
+		return userNSImageOwn
+	}
+	if gpu && engineUsesCDI(engine) {
+		return userNSHostRoot
+	}
 	c, ok := container.EngineCapabilityFor(engine)
-	return ok && c.SupportsUsernsKeepID && c.UsernsKeepIDArg != "" && bindMounts > 0
+	if !ok || !c.SupportsUsernsKeepID || c.UsernsKeepIDArg == "" {
+		return userNSImageOwn
+	}
+	return userNSKeepID
 }
 
 // engineUsesCDI reports whether the engine's GPU passthrough uses the CDI device form. It is

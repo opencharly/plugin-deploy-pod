@@ -280,7 +280,7 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, s
 	// emission path below (the direct return and the quadlet write) and before any start, so the
 	// ownership is right however the container is created; `charly remove` keeps named volumes, so
 	// the re-run of an existing deploy is the normal case this must repair.
-	if err := reconcileNamedVolumeRoots(ctx, ex, string(sel.Engine), volumeRootKeepID(rt.RunMode, string(sel.Engine), len(bindMounts)), uid, gid, imageRef, volumes); err != nil {
+	if err := reconcileNamedVolumeRoots(ctx, ex, string(sel.Engine), volumeRootKeepID(rt.RunMode, string(sel.Engine), len(bindMounts), detected.GPU, security.Privileged), uid, gid, imageRef, volumes); err != nil {
 		return err
 	}
 

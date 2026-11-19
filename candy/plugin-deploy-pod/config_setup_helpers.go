@@ -566,8 +566,13 @@ func directRunArgs(qcfg deploykit.QuadletConfig, bindMounts []deploykit.Resolved
 		Image: qcfg.ImageRef, Name: name, Network: network,
 		Hostname: name, Restart: "always",
 		Detach: true,
-		KeepID: engineKeepID(string(sel.Engine), len(bindMounts)),
+		UserNS: podUserNSFor(string(sel.Engine), qcfg.GPU, len(bindMounts)),
 		UID:    qcfg.UID, GID: qcfg.GID,
+		// The GPU fact reaches the launch here as it does in every other emitter: without it the
+		// direct-mode argv carried no device while the deploy's own config said it had one, so
+		// the user-namespace rule above would have been decided over a device that was never
+		// injected.
+		GPU:        qcfg.GPU,
 		Ports:      localizedPorts(qcfg.Ports, qcfg.BindAddress),
 		Volumes:    volumeArgs(qcfg.Volumes, bindMounts),
 		Env:        qcfg.Env,
@@ -1122,7 +1127,7 @@ func buildStartArgs(sel podSelection, imageRef string, uid, gid int, ports []str
 		Image: imageRef, Name: name, Network: net,
 		WorkingDir: workingDir, Hostname: name,
 		Detach: true, Remove: true,
-		KeepID: engineKeepID(string(sel.Engine), len(bindMounts)),
+		UserNS: podUserNSFor(string(sel.Engine), gpu, len(bindMounts)),
 		UID:    uid, GID: gid,
 		Ports:      localizedPorts(ports, bindAddr),
 		Volumes:    volumeArgs(volumes, bindMounts),
