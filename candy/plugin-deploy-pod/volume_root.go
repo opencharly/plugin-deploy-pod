@@ -37,24 +37,11 @@ import (
 // is the only thing this helper touches.
 const volumeRootScratchPath = "/charly-volume-root"
 
-// Several emitters can create the container a deploy's named volumes are attached to. The
-// direct/start/shell/systemd-unit paths all ask podUserNSFor (the RESOLVED-deploy decision over the
-// capability facts) directly, so they cannot drift; the quadlet emitter — sdk/deploykit/quadlet.go's
-// `UserNS=` line, which cannot import this package — is mirrored here and pinned by a test against
-// the renderer's real output.
-
-// quadletCarriesCDIDevice mirrors the sdk renderer's own fact: a GPU deploy that is not privileged
-// receives `AddDevice=nvidia.com/gpu=all`, i.e. the unit CARRIES the CDI device. Quadlet is podman,
-// whose GPUArgStyle is "cdi" by definition, so no engine question is needed here.
-func quadletCarriesCDIDevice(gpu, privileged bool) bool { return gpu && !privileged }
-
-// quadletKeepID mirrors sdk/deploykit/quadlet.go's `UserNS=` arm: a quadlet deploy is podman-only,
-// so the emitter tests neither the engine nor the deploy user. It emits keep-id for any bind mount
-// EXCEPT on a unit that carries the CDI device, which runs userns=host as container root instead
-// (opencharly/plugin-deploy-pod#81).
-func quadletKeepID(bindMounts int, cdiDevice bool) bool {
-	return bindMounts > 0 && !cdiDevice
-}
+// Every emitter that can create the deploy's container — the engine `start_plan` argv, `charly
+// shell`, `charly exec`, and the quadlet renderer in sdk — decides the user-namespace mapping with
+// the SAME predicate, podUserNSFor (engine_ops.go). The quadlet renderer cannot import this
+// package, so its arm is not re-stated here: the drift guard in volume_root_test.go compares this
+// decision against `deploykit.GenerateQuadlet`'s real output for every row.
 
 // volumeRootKeepID reports whether this deploy's runtime container is emitted with
 // `--userns=keep-id:uid=<uid>,gid=<gid>`, by ANY emitter that could create it. Under keep-id the
@@ -63,13 +50,10 @@ func quadletKeepID(bindMounts int, cdiDevice bool) bool {
 // that from its own standard-mapping helper — where that same host user appears as container root —
 // so it steps aside rather than write an owner the keep-id runtime could not use.
 //
-// The direct, start, shell and systemd-unit paths all consult podUserNSFor, so their keep-id answer
-// IS that one decision. Quadlet is the one emitter with its own generator and its own condition.
-func volumeRootKeepID(runMode, engine string, bindMounts int, gpu, privileged bool) bool {
-	if runMode == "quadlet" {
-		return quadletKeepID(bindMounts, quadletCarriesCDIDevice(gpu, privileged))
-	}
-	return podUserNSFor(engine, gpu, bindMounts).keepID()
+// It IS the one decision, not a copy of it: a quadlet run mode resolves to podman, which is what
+// `engine` already names, so no per-mode branch is needed.
+func volumeRootKeepID(engine string, bindMounts int, gpu, privileged bool) bool {
+	return podUserNSFor(engine, gpu, privileged, bindMounts).keepID()
 }
 
 // volumeRootReconcileArgs builds the argv of the throwaway container that gives one named volume a

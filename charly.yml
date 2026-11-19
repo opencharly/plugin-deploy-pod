@@ -322,7 +322,7 @@ check-pod-cdi-userns:
                     # FRESH REBUILD. `charly update` is the verb this leg wants, and it cannot run
                     # here: its re-add step routes the deploy's `image:` (a fully-qualified registry
                     # ref) through the box/candy resolver, which fails in a project that declares no
-                    # box of that name (opencharly/plugin-fleet#<TBD>, filed from this cutover). For a
+                    # box of that name (opencharly/plugin-fleet#52, filed from this cutover). For a
                     # quadlet deploy whose image needs no rebuild, update IS destroy -> regenerate ->
                     # start, which is exactly the sequence driven here with the charly verbs.
                     echo "== fresh rebuild: remove -> config -> start"

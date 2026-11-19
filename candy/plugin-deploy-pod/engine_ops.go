@@ -72,9 +72,7 @@ func engineRunArgv(target deploykit.ContainerdTarget, r podEngineRun) ([]string,
 	if r.WorkingDir != "" {
 		extra = append(extra, "-w", r.WorkingDir)
 	}
-	if r.GPU {
-		extra = append(extra, kit.GPURunArgs(engine)...)
-	}
+	extra = append(extra, podGPUArgs(engine, r.GPU, r.Security.Privileged)...)
 	extra = append(extra, deploykit.SecurityArgs(r.Security)...)
 	for _, m := range r.Security.Mounts {
 		if after, ok := strings.CutPrefix(m, "tmpfs:"); ok {
@@ -318,6 +316,26 @@ func (m podUserNS) keepID() bool { return m == userNSKeepID }
 // hostRoot reports whether this mapping is userns=host with the workload as container root.
 func (m podUserNS) hostRoot() bool { return m == userNSHostRoot }
 
+// podCarriesCDIDevice is the ONE fact the mapping and the device injection are both decided on:
+// this launch/unit carries a CDI GPU device. A privileged deploy does not — `--privileged` IS the
+// device grant, and the quadlet renderer has always skipped `AddDevice=` for it, so the argv now
+// matches the unit instead of passing a redundant `--device` the unit does not have. Before this
+// the two emitters answered this differently, which is how a privileged GPU+bind deploy got
+// `userns=host` in the argv and `keep-id` in the unit.
+func podCarriesCDIDevice(engine string, gpu, privileged bool) bool {
+	return gpu && !privileged && engineUsesCDI(engine)
+}
+
+// podGPUArgs returns the engine's GPU passthrough arguments for this deploy, or nil when it asks
+// for no GPU or already holds every device through --privileged. It is the argv twin of the
+// unit's `AddDevice=` line, so both name the device from the SAME fact.
+func podGPUArgs(engine string, gpu, privileged bool) []string {
+	if !gpu || privileged {
+		return nil
+	}
+	return kit.GPURunArgs(engine)
+}
+
 // podUserNSFor decides the mapping from the RESOLVED deploy (does it carry a CDI device? does it
 // have a host-owned bind mount?) and the engine's capability facts — never from an engine name and
 // never from a second hand-maintained list of "GPU deploys".
@@ -325,12 +343,12 @@ func (m podUserNS) hostRoot() bool { return m == userNSHostRoot }
 // keep-id exists to make a host-owned bind writable, so it is only ever in play when a bind mount
 // exists; a deploy with no bind mount keeps the mapping it has today (measured: `--device` alone
 // starts, and the CDI mounts apply fine under the default mapping). A bind-only deploy keeps
-// keep-id EXACTLY as it is today — nothing about it changes.
-func podUserNSFor(engine string, gpu bool, bindMounts int) podUserNS {
+// keep-id EXACTLY as it is today, and so does a privileged one — nothing about either changes.
+func podUserNSFor(engine string, gpu, privileged bool, bindMounts int) podUserNS {
 	if bindMounts == 0 {
 		return userNSImageOwn
 	}
-	if gpu && engineUsesCDI(engine) {
+	if podCarriesCDIDevice(engine, gpu, privileged) {
 		return userNSHostRoot
 	}
 	c, ok := container.EngineCapabilityFor(engine)

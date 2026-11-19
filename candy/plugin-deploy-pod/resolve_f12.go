@@ -68,7 +68,7 @@ func resolvePodShellPlan(ctx context.Context, ex *sdk.Executor, box, instance st
 	if containerRunningLocal(sel.Target, name) {
 		execEnv := append(append([]string{}, envVars...), agentFwd.Env...)
 		workDir := deploykit.ResolveWorkingDir(volumes, bindMounts, home, box, instance)
-		userNS := podUserNSFor(string(sel.Engine), detected.GPU, len(bindMounts))
+		userNS := podUserNSFor(string(sel.Engine), detected.GPU, security.Privileged, len(bindMounts))
 		argv := buildExecArgs(sel.Target, name, uid, gid, userNS, command, execEnv, workDir, opts.Interactive)
 		return &spec.PodLiveStdioPlan{Script: hostAttachScript(argv, opts.WrapPTY)}, nil
 	}
@@ -195,7 +195,7 @@ func buildShellArgs(target deploykit.ContainerdTarget, imageRef string, uid, gid
 	// The user-namespace mapping decides the USER too: under userns=host the deploy's own uid
 	// maps to a subuid and cannot write the host-owned bind, so the transient container runs as
 	// container root — the same mapping the emitted unit carries (engine_ops.go, podUserNSFor).
-	userNS := podUserNSFor(engine, gpu, len(bindMounts))
+	userNS := podUserNSFor(engine, gpu, security.Privileged, len(bindMounts))
 	user := fmt.Sprintf("%d:%d", uid, gid)
 	if userNS.hostRoot() {
 		user = containerRootUser
@@ -208,9 +208,7 @@ func buildShellArgs(target deploykit.ContainerdTarget, imageRef string, uid, gid
 	if len(network) > 0 && network[0] != "" {
 		args = append(args, "--network", network[0])
 	}
-	if gpu {
-		args = append(args, kit.GPURunArgs(engine)...)
-	}
+	args = append(args, podGPUArgs(engine, gpu, security.Privileged)...)
 	args = append(args, deploykit.SecurityArgs(security)...)
 	for _, port := range ports {
 		args = append(args, "-p", deploykit.LocalizePort(port, bindAddr))

@@ -309,14 +309,20 @@ func TestResolvePodStartSystemdUnit_StartsViaSystemctl(t *testing.T) {
 // leaves UsernsKeepIDArg empty, so nerdctl never gets podman's spelling, and a bind-only podman
 // deploy keeps it exactly as it had it.
 func TestPodUserNS_KeepIDIsTheCapabilityFact(t *testing.T) {
-	if got := podUserNSFor("containerd", false, 1); got.keepID() {
+	if got := podUserNSFor("containerd", false, false, 1); got.keepID() {
 		t.Errorf("containerd must not emit a keep-id argument, got mapping %v", got)
 	}
-	if got := podUserNSFor("podman", false, 1); !got.keepID() {
+	if got := podUserNSFor("podman", false, false, 1); !got.keepID() {
 		t.Errorf("podman's capability row declares keep-id; the bind-only podman control arm must keep it, got mapping %v", got)
 	}
-	if got := podUserNSFor("podman", false, 0); got != userNSImageOwn {
+	if got := podUserNSFor("podman", false, false, 0); got != userNSImageOwn {
 		t.Errorf("no bind mount means keep-id was never in play: got mapping %v", got)
+	}
+	// A PRIVILEGED gpu deploy carries no CDI device (`--privileged` IS the device grant, and the
+	// quadlet renderer has always skipped `AddDevice=` for it), so it keeps keep-id — on every
+	// emitter, which is what the cross-emitter guard in volume_root_test.go asserts.
+	if got := podUserNSFor("podman", true, true, 1); !got.keepID() {
+		t.Errorf("a privileged GPU deploy carries no CDI device and must keep keep-id, got mapping %v", got)
 	}
 }
 
@@ -336,7 +342,7 @@ func TestPodUserNS_CDIDeviceNeverKeepID(t *testing.T) {
 
 	// The predicate itself: the resolved deploy carries a device, so keep-id is out and the
 	// host/root mapping is in.
-	if got := podUserNSFor("podman", true, binds); got != userNSHostRoot {
+	if got := podUserNSFor("podman", true, false, binds); got != userNSHostRoot {
 		t.Fatalf("a CDI deploy with a bind mount must run userns=host as container root, got mapping %v", got)
 	}
 
@@ -367,6 +373,34 @@ func TestPodUserNS_CDIDeviceNeverKeepID(t *testing.T) {
 	}
 	if !hasFlag(controlArgv, "--userns=keep-id:uid=1000,gid=1000") {
 		t.Errorf("a bind-only deploy must keep its keep-id mapping unchanged: %q", controlArgv)
+	}
+
+	// A PRIVILEGED gpu deploy is the other control, and it must be consistent on BOTH sides of the
+	// emitter pair: no explicit device in the argv (the unit carries none either), and therefore
+	// the keep-id mapping the unit also emits. Before this arm existed the argv carried
+	// `--device nvidia.com/gpu=all` under keep-id — the exact combination that cannot start.
+	privSecurity := spec.SecurityConfig{Privileged: true}
+	privArgv, err := buildStartArgs(sel, "img", 1000, 1000, nil, "ctr", nil, bindMounts,
+		true, "", nil, privSecurity, nil, "/")
+	if err != nil {
+		t.Fatalf("buildStartArgs(privileged): %v", err)
+	}
+	if !hasFlag(privArgv, "--userns=keep-id:uid=1000,gid=1000") {
+		t.Errorf("a privileged GPU deploy keeps keep-id in the argv, like its unit: %q", privArgv)
+	}
+	if hasFlag(privArgv, "--device") {
+		t.Errorf("a privileged launch must not add a CDI device the unit does not carry: %q", privArgv)
+	}
+	privShell := buildShellArgs(sel.Target, "img", 1000, 1000, nil, nil, bindMounts, true,
+		"", "", nil, privSecurity, "/", true)
+	if !hasFlag(privShell, "--userns=keep-id:uid=1000,gid=1000") || hasFlag(privShell, "--device") {
+		t.Errorf("charly shell must agree with charly start on a privileged deploy: %q", privShell)
+	}
+	if got := podGPUArgs("podman", true, true); got != nil {
+		t.Errorf("a privileged deploy gets no explicit GPU args, got %q", got)
+	}
+	if got := podGPUArgs("podman", true, false); len(got) == 0 {
+		t.Error("an unprivileged CDI deploy must still carry its device arguments")
 	}
 }
 
