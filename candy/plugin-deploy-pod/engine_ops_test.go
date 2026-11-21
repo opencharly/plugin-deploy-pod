@@ -187,6 +187,9 @@ func kitResolvedRuntimeForTest(engine, mode, rootful string) *kit.ResolvedRuntim
 func TestWriteSystemdUnitConfig_Containerd(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	// The unit path resolves through XDG_CONFIG_HOME first (spec/storeroot), and TestMain sets it
+	// package-wide, so the home this test expects must carry the config root too.
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	rt := kitResolvedRuntimeForTest("containerd", "systemd-unit", "auto")
 	qcfg := deploykit.QuadletConfig{BoxName: "demo", ImageRef: "img", Home: "/home/user"}
 

@@ -81,6 +81,20 @@ func buildOverlay(ctx context.Context, exec *sdk.Executor, reply spec.OverlayBui
 
 	overlayCandies := collectOverlayCandies(plans)
 
+	// The overlay builds no builder images of its own, so each builder image its stages will name is
+	// ensured FIRST, through the ONE build:ensure dispatch this plugin uses (dispatchBuildEnsurePeer:
+	// present in the overlay engine's store, or built from its project entry) — the box build
+	// produces them as its dependencies (opencharly/sdk#608). First, because an ensure that builds
+	// regenerates the project's .build/ tree, which prunes every directory that is not a box — the
+	// overlay dir created below included (measured: the Containerfile write then failed ENOENT).
+	if ensureBox := dg.Boxes[baseName]; ensureBox != nil {
+		for _, ref := range dg.NeededBuilderImages(baseName, ensureBox, overlayCandies) {
+			if err := dispatchBuildEnsurePeer(ctx, exec, ref, engineBin, dir); err != nil {
+				return "", fmt.Errorf("overlay builder image %s: %w", ref, err)
+			}
+		}
+	}
+
 	// The overlay build dir (relative to the project root = the build-context root). The emitted
 	// Containerfile + the service fragments live here; the per-candy FROM scratch COPY sources +
 	// the inline-content staging live under the project root (.build/_candy / .build/_inline).
@@ -173,16 +187,20 @@ func buildOverlay(ctx context.Context, exec *sdk.Executor, reply spec.OverlayBui
 			return "", svcErr
 		}
 	}
-	// The service scratch stage must come BEFORE the main FROM so buildah sees it when the
-	// main-stage RUN does `--mount=type=bind,from=<stage>`.
-	if svcStage != "" {
-		cf.WriteString(svcStage)
+	// Builder stages: the overlay candies' build-time builders (npm/pixi/mise/aur) render through the
+	// SAME Generator path the image build uses (D-IR-1, opencharly/sdk#608), with the fail-loud
+	// pre-pass (a needed builder that cannot run is an error) and the builder box resolved to its
+	// image. overlayMainStage places them.
+	var builderStages, builderArtifacts strings.Builder
+	if box != nil {
+		if err := dg.EmitBuilderStages(&builderStages, baseName, box, overlayCandies); err != nil {
+			return "", fmt.Errorf("overlay builder stages: %w", err)
+		}
+		if err := dg.EmitBuilderArtifacts(&builderArtifacts, box, overlayCandies); err != nil {
+			return "", fmt.Errorf("overlay builder artifacts: %w", err)
+		}
 	}
-	fmt.Fprintf(&cf, "FROM %s\n\n", reply.BaseImage)
-	// Reset to USER root after FROM so candy tasks with `user: root` (most install/config tasks)
-	// run with the correct privileges (the full-build convention).
-	cf.WriteString("USER root\n\n")
-	cf.WriteString(oci.String())
+	cf.WriteString(overlayMainStage(svcStage, builderStages.String(), reply.BaseImage, builderArtifacts.String(), oci.String()))
 	// Append service fragments inside the MAIN image stage (after all candy tasks). This extends
 	// the base image's /etc/supervisord.conf instead of replacing it.
 	if svcAppend != "" {
@@ -541,4 +559,22 @@ func appendUnique(dst []string, items ...string) []string {
 		}
 	}
 	return dst
+}
+
+// overlayMainStage lays out the overlay Containerfile from the stages before the main FROM through
+// the overlay candies' tasks, in the order the image build uses:
+//   - the service scratch stage and the builder stages come BEFORE the main FROM, because a main-stage
+//     RUN or COPY names them (`--mount=type=bind,from=<stage>`, `COPY --from=<stage>`), and a stage
+//     opened after the main FROM would make the builder stage the final image and copy nothing back;
+//   - `USER root` follows the main FROM, so candy tasks that install system files can run;
+//   - each builder's payload is copied in before the candy tasks, as the image build does it.
+func overlayMainStage(svcStage, builderStages, baseImage, builderArtifacts, tasks string) string {
+	var b strings.Builder
+	b.WriteString(svcStage)
+	b.WriteString(builderStages)
+	fmt.Fprintf(&b, "FROM %s\n\n", baseImage)
+	b.WriteString("USER root\n\n")
+	b.WriteString(builderArtifacts)
+	b.WriteString(tasks)
+	return b.String()
 }
