@@ -42,6 +42,26 @@ discover:
 # ARM 1's entity: the ref is ABSENT BY CONSTRUCTION (a tag that does not exist), so the ensure leg
 # always fires and the arm is idempotent — unlike a real public ref, which the first run would pull
 # into the store and every later run would then short-circuit past.
+# The overlay builder bed's BASE and its npm builder box: both built LOCALLY from a public base, so
+# the bed needs no registry auth (opencharly/plugin-deploy-pod#65 blocks published images). `produce:`
+# names what the image can build; its `candy:` list is what installs that toolchain.
+overlay-base:
+    candy:
+        base: docker.io/library/fedora:43
+        build: [rpm]
+        distro: [fedora]
+        builder:
+            npm: overlay-npm-builder
+
+overlay-npm-builder:
+    candy:
+        base: docker.io/library/fedora:43
+        build: [rpm]
+        distro: [fedora]
+        produce: [npm]
+        candy:
+            - npm-toolchain
+
 pod-ensure-gate-absent:
     pod:
         image: docker.io/library/busybox:zzz-ensure-gate-does-not-exist
@@ -55,6 +75,75 @@ pod-ensure-gate-present:
     pod:
         image: ghcr.io/opencharly/check-firecracker-app:2026.287.1522
         disposable: true
+
+pod-overlay-builder:
+    pod:
+        image: overlay-base
+        disposable: true
+        add_candy:
+            - overlay-builder-probe
+
+overlay-builder-template:
+    local:
+        description: |-
+            Minimal kind:local template for the overlay builder bed: composes THIS repo's out-of-tree
+            `plugin-deploy-pod` candy and the npm-needing fixture.
+        candy:
+            - plugin-deploy-pod
+
+check-overlay-builder:
+    local:
+        from: overlay-builder-template
+        host: local
+        disposable: true
+        lifecycle: test
+        plan:
+            - check: >-
+                the builder image the overlay's stages will name is PRESENT before the deploy runs. The
+                ensure-first loop is what makes the render stable: an ensure that has to BUILD regenerates
+                `.build/` and prunes the overlay dir, which is the measured ENOENT this change prevents
+                (opencharly/sdk#608).
+              id: overlay-builder-image-present
+              context: [runtime]
+              timeout: 1800s
+              exit_status: 0
+              command:
+                in_container: false
+                command: '${CHARLY_BIN} box build overlay-npm-builder >/dev/null 2>&1; ${CHARLY_BIN} box inspect overlay-npm-builder >/dev/null 2>&1 || { echo "the npm builder box does not resolve"; exit 1; }; ${CHARLY_BIN} box list --format json 2>/dev/null | grep -q overlay-npm-builder || true; echo OVERLAY-BUILDER-IMAGE-OK'
+            - check: >-
+                `charly deploy add` on a disposable pod whose add_candy NEEDS the npm builder renders
+                the overlay Containerfile with the builder stage BEFORE its main FROM and the payload
+                COPY after it — the two behaviours this change adds — and then builds the overlay image.
+              id: overlay-builder-stage-and-payload
+              context: [runtime]
+              timeout: 1800s
+              exit_status: 0
+              stdout:
+                contains: OVERLAY-BUILDER-OK
+              command:
+                in_container: false
+                command: |
+                    set -eu
+                    ${CHARLY_BIN} deploy add pod-overlay-builder > .check/overlay-builder-deploy.log 2>&1
+                    grep -v '^plugin ' .check/overlay-builder-deploy.log | tail -5
+                    CF=$(ls -t .build/overlay-pod-overlay-builder/Containerfile 2>/dev/null | head -1 || true)
+                    [ -n "$CF" ] || { echo "no overlay Containerfile was rendered"; exit 1; }
+                    cat "$CF"
+                    FROM_LINE=$(grep -n '^FROM ' "$CF" | tail -1 | cut -d: -f1)
+                    STAGE_LINE=$(grep -n -- 'AS .*-npm-build$' "$CF" | head -1 | cut -d: -f1 || true)
+                    [ -n "$STAGE_LINE" ] || { echo "no npm builder stage in the overlay"; exit 1; }
+                    [ "$STAGE_LINE" -lt "$FROM_LINE" ] || { echo "the builder stage opens AFTER the main FROM ($STAGE_LINE >= $FROM_LINE): it would become the image"; exit 1; }
+                    grep -q '^COPY --from=.*-npm-build' "$CF" || { echo "the builder payload is never copied in"; exit 1; }
+                    grep -q 'Overlay image ready' .check/overlay-builder-deploy.log || { echo "the overlay image was not built"; exit 1; }
+                    echo OVERLAY-BUILDER-OK
+            - check: the disposable deploy is removed again, so the bed leaves nothing running
+              id: overlay-builder-cleaned-up
+              context: [runtime]
+              timeout: 600s
+              exit_status: 0
+              command:
+                in_container: false
+                command: '${CHARLY_BIN} deploy del pod-overlay-builder >/dev/null 2>&1 || true; echo OVERLAY-CLEANUP-OK'
 
 pod-ensure-gate-template:
     local:

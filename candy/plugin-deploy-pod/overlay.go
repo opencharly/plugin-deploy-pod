@@ -81,12 +81,15 @@ func buildOverlay(ctx context.Context, exec *sdk.Executor, reply spec.OverlayBui
 
 	overlayCandies := collectOverlayCandies(plans)
 
-	// The overlay build dir (relative to the project root = the build-context root). The emitted
-	// Containerfile + the service fragments live here; the per-candy FROM scratch COPY sources +
-	// the inline-content staging live under the project root (.build/_candy / .build/_inline).
-	overlayDir := filepath.Join(".build", "overlay-"+reply.DeployName)
-	if err := os.MkdirAll(overlayDir, 0755); err != nil {
-		return "", fmt.Errorf("overlay build dir: %w", err)
+	// The overlay builds no builder images of its own, so each builder image its stages will name is
+	// ensured FIRST, through the ONE build:ensure dispatch this plugin uses (dispatchBuildEnsurePeer:
+	// present in the overlay engine's store, or built from its project entry) — the box build
+	// produces them as its dependencies (opencharly/sdk#608). First, because an ensure that builds
+	// regenerates the project's .build/ tree, which prunes every directory that is not a box — the
+	// overlay dir created below included (measured: the Containerfile write then failed ENOENT).
+	overlayDir, err := prepareOverlayBuild(ctx, exec, dg, baseName, reply.DeployName, overlayCandies, engineBin, dir)
+	if err != nil {
+		return "", err
 	}
 
 	// createRemoteCandyCopies (staging remote add_candy source trees under .build/_candy/) ran
@@ -173,16 +176,15 @@ func buildOverlay(ctx context.Context, exec *sdk.Executor, reply spec.OverlayBui
 			return "", svcErr
 		}
 	}
-	// The service scratch stage must come BEFORE the main FROM so buildah sees it when the
-	// main-stage RUN does `--mount=type=bind,from=<stage>`.
-	if svcStage != "" {
-		cf.WriteString(svcStage)
+	// Builder stages: the overlay candies' build-time builders (npm/pixi/mise/aur) render through the
+	// SAME Generator path the image build uses (D-IR-1, opencharly/sdk#608), with the fail-loud
+	// pre-pass (a needed builder that cannot run is an error) and the builder box resolved to its
+	// image. overlayMainStage places them.
+	builderStages, builderArtifacts, err := emitOverlayBuilders(dg, baseName, box, overlayCandies)
+	if err != nil {
+		return "", err
 	}
-	fmt.Fprintf(&cf, "FROM %s\n\n", reply.BaseImage)
-	// Reset to USER root after FROM so candy tasks with `user: root` (most install/config tasks)
-	// run with the correct privileges (the full-build convention).
-	cf.WriteString("USER root\n\n")
-	cf.WriteString(oci.String())
+	cf.WriteString(overlayMainStage(svcStage, builderStages, reply.BaseImage, builderArtifacts, oci.String()))
 	// Append service fragments inside the MAIN image stage (after all candy tasks). This extends
 	// the base image's /etc/supervisord.conf instead of replacing it.
 	if svcAppend != "" {
@@ -541,4 +543,60 @@ func appendUnique(dst []string, items ...string) []string {
 		}
 	}
 	return dst
+}
+
+// overlayMainStage lays out the overlay Containerfile from the stages before the main FROM through
+// the overlay candies' tasks, in the order the image build uses:
+//   - the service scratch stage and the builder stages come BEFORE the main FROM, because a main-stage
+//     RUN or COPY names them (`--mount=type=bind,from=<stage>`, `COPY --from=<stage>`), and a stage
+//     opened after the main FROM would make the builder stage the final image and copy nothing back;
+//   - `USER root` follows the main FROM, so candy tasks that install system files can run;
+//   - each builder's payload is copied in before the candy tasks, as the image build does it.
+func overlayMainStage(svcStage, builderStages, baseImage, builderArtifacts, tasks string) string {
+	var b strings.Builder
+	b.WriteString(svcStage)
+	b.WriteString(builderStages)
+	fmt.Fprintf(&b, "FROM %s\n\n", baseImage)
+	b.WriteString("USER root\n\n")
+	b.WriteString(builderArtifacts)
+	b.WriteString(tasks)
+	return b.String()
+}
+
+// prepareOverlayBuild does the overlay's two first steps IN THIS ORDER: ensure every builder image
+// the stages will name, then create the overlay build dir. The order is load-bearing — an ensure
+// that builds regenerates the project's .build/ tree and prunes every directory that is not a box,
+// so creating the overlay dir first loses it (measured: the Containerfile write then failed ENOENT).
+// Its test asserts the overlay dir does not exist yet at the moment the ensure runs.
+func prepareOverlayBuild(ctx context.Context, exec *sdk.Executor, dg *deploykit.Generator, baseName, deployName string, overlayCandies []string, engineBin, dir string) (string, error) {
+	if ensureBox := dg.Boxes[baseName]; ensureBox != nil {
+		for _, ref := range dg.NeededBuilderImages(baseName, ensureBox, overlayCandies) {
+			if err := dispatchBuildEnsurePeer(ctx, exec, ref, engineBin, dir); err != nil {
+				return "", fmt.Errorf("overlay builder image %s: %w", ref, err)
+			}
+		}
+	}
+	overlayDir := filepath.Join(".build", "overlay-"+deployName)
+	if err := os.MkdirAll(overlayDir, 0755); err != nil {
+		return "", fmt.Errorf("overlay build dir: %w", err)
+	}
+	return overlayDir, nil
+}
+
+// emitOverlayBuilders is the overlay's builder wiring: the SAME Generator path the image build uses
+// emits each overlay candy's builder stage and payload, and a needed builder the image cannot run is
+// an error rather than a silently absent stage (opencharly/sdk#608). Its own test drives it through
+// that path, so deleting the wiring fails the test rather than only the helper's.
+func emitOverlayBuilders(dg *deploykit.Generator, baseName string, box *buildkit.ResolvedBox, overlayCandies []string) (stages, artifacts string, err error) {
+	if box == nil {
+		return "", "", nil
+	}
+	var sb, ab strings.Builder
+	if err := dg.EmitBuilderStages(&sb, baseName, box, overlayCandies); err != nil {
+		return "", "", fmt.Errorf("overlay builder stages: %w", err)
+	}
+	if err := dg.EmitBuilderArtifacts(&ab, box, overlayCandies); err != nil {
+		return "", "", fmt.Errorf("overlay builder artifacts: %w", err)
+	}
+	return sb.String(), ab.String(), nil
 }
