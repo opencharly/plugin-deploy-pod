@@ -87,20 +87,9 @@ func buildOverlay(ctx context.Context, exec *sdk.Executor, reply spec.OverlayBui
 	// produces them as its dependencies (opencharly/sdk#608). First, because an ensure that builds
 	// regenerates the project's .build/ tree, which prunes every directory that is not a box — the
 	// overlay dir created below included (measured: the Containerfile write then failed ENOENT).
-	if ensureBox := dg.Boxes[baseName]; ensureBox != nil {
-		for _, ref := range dg.NeededBuilderImages(baseName, ensureBox, overlayCandies) {
-			if err := dispatchBuildEnsurePeer(ctx, exec, ref, engineBin, dir); err != nil {
-				return "", fmt.Errorf("overlay builder image %s: %w", ref, err)
-			}
-		}
-	}
-
-	// The overlay build dir (relative to the project root = the build-context root). The emitted
-	// Containerfile + the service fragments live here; the per-candy FROM scratch COPY sources +
-	// the inline-content staging live under the project root (.build/_candy / .build/_inline).
-	overlayDir := filepath.Join(".build", "overlay-"+reply.DeployName)
-	if err := os.MkdirAll(overlayDir, 0755); err != nil {
-		return "", fmt.Errorf("overlay build dir: %w", err)
+	overlayDir, err := prepareOverlayBuild(ctx, exec, dg, baseName, reply.DeployName, overlayCandies, engineBin, dir)
+	if err != nil {
+		return "", err
 	}
 
 	// createRemoteCandyCopies (staging remote add_candy source trees under .build/_candy/) ran
@@ -578,6 +567,26 @@ func overlayMainStage(svcStage, builderStages, baseImage, builderArtifacts, task
 // emits each overlay candy's builder stage and payload, and a needed builder the image cannot run is
 // an error rather than a silently absent stage (opencharly/sdk#608). Its own test drives it through
 // that path, so deleting the wiring fails the test rather than only the helper's.
+// prepareOverlayBuild does the overlay's two first steps IN THIS ORDER: ensure every builder image
+// the stages will name, then create the overlay build dir. The order is load-bearing — an ensure
+// that builds regenerates the project's .build/ tree and prunes every directory that is not a box,
+// so creating the overlay dir first loses it (measured: the Containerfile write then failed ENOENT).
+// Its test asserts the overlay dir does not exist yet at the moment the ensure runs.
+func prepareOverlayBuild(ctx context.Context, exec *sdk.Executor, dg *deploykit.Generator, baseName, deployName string, overlayCandies []string, engineBin, dir string) (string, error) {
+	if ensureBox := dg.Boxes[baseName]; ensureBox != nil {
+		for _, ref := range dg.NeededBuilderImages(baseName, ensureBox, overlayCandies) {
+			if err := dispatchBuildEnsurePeer(ctx, exec, ref, engineBin, dir); err != nil {
+				return "", fmt.Errorf("overlay builder image %s: %w", ref, err)
+			}
+		}
+	}
+	overlayDir := filepath.Join(".build", "overlay-"+deployName)
+	if err := os.MkdirAll(overlayDir, 0755); err != nil {
+		return "", fmt.Errorf("overlay build dir: %w", err)
+	}
+	return overlayDir, nil
+}
+
 func emitOverlayBuilders(dg *deploykit.Generator, baseName string, box *buildkit.ResolvedBox, overlayCandies []string) (stages, artifacts string, err error) {
 	if box == nil {
 		return "", "", nil

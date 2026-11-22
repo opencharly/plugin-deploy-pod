@@ -24,12 +24,10 @@ func TestEmitOverlayBuildersDrivesTheGeneratorsBuilderPath(t *testing.T) {
 	npmCandy := deploykit.NewSpecCandyModel(spec.CandyModel{Name: "web", SourceDir: dir}, spec.CandyView{Name: "web"})
 	withVocab := &buildkit.ResolvedBox{ResolvedBox: spec.ResolvedBox{Name: "base"},
 		BuilderConfig: &spec.BuilderConfig{Builder: map[string]*spec.Builder{"npm": {DetectFiles: []string{"package.json"}}}}}
-	noVocab := &buildkit.ResolvedBox{ResolvedBox: spec.ResolvedBox{Name: "base"}}
 	dg := &deploykit.Generator{
 		Boxes:   map[string]*buildkit.ResolvedBox{"base": withVocab},
 		Candies: map[string]deploykit.CandyModel{"web": npmCandy},
 	}
-	_ = noVocab
 
 	if _, _, err := emitOverlayBuilders(dg, "base", nil, []string{"web"}); err != nil {
 		t.Errorf("no box means no builder wiring; got %v", err)
