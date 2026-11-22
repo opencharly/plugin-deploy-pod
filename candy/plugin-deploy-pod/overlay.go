@@ -563,10 +563,6 @@ func overlayMainStage(svcStage, builderStages, baseImage, builderArtifacts, task
 	return b.String()
 }
 
-// emitOverlayBuilders is the overlay's builder wiring: the SAME Generator path the image build uses
-// emits each overlay candy's builder stage and payload, and a needed builder the image cannot run is
-// an error rather than a silently absent stage (opencharly/sdk#608). Its own test drives it through
-// that path, so deleting the wiring fails the test rather than only the helper's.
 // prepareOverlayBuild does the overlay's two first steps IN THIS ORDER: ensure every builder image
 // the stages will name, then create the overlay build dir. The order is load-bearing — an ensure
 // that builds regenerates the project's .build/ tree and prunes every directory that is not a box,
@@ -587,6 +583,10 @@ func prepareOverlayBuild(ctx context.Context, exec *sdk.Executor, dg *deploykit.
 	return overlayDir, nil
 }
 
+// emitOverlayBuilders is the overlay's builder wiring: the SAME Generator path the image build uses
+// emits each overlay candy's builder stage and payload, and a needed builder the image cannot run is
+// an error rather than a silently absent stage (opencharly/sdk#608). Its own test drives it through
+// that path, so deleting the wiring fails the test rather than only the helper's.
 func emitOverlayBuilders(dg *deploykit.Generator, baseName string, box *buildkit.ResolvedBox, overlayCandies []string) (stages, artifacts string, err error) {
 	if box == nil {
 		return "", "", nil
