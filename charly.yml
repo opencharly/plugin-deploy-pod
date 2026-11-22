@@ -109,7 +109,7 @@ check-overlay-builder:
               exit_status: 0
               command:
                 in_container: false
-                command: '${CHARLY_BIN} box build overlay-npm-builder >/dev/null 2>&1; ${CHARLY_BIN} box inspect overlay-npm-builder >/dev/null 2>&1 || { echo "the npm builder box does not resolve"; exit 1; }; ${CHARLY_BIN} box list --format json 2>/dev/null | grep -q overlay-npm-builder || true; echo OVERLAY-BUILDER-IMAGE-OK'
+                command: '${CHARLY_BIN} box build overlay-base >/dev/null 2>&1; ${CHARLY_BIN} box inspect overlay-base >/dev/null 2>&1 || { echo "the overlay base box does not resolve"; exit 1; }; ${CHARLY_BIN} box build overlay-npm-builder >/dev/null 2>&1; ${CHARLY_BIN} box inspect overlay-npm-builder >/dev/null 2>&1 || { echo "the npm builder box does not resolve"; exit 1; }; echo OVERLAY-BUILDER-IMAGE-OK'
             - check: >-
                 `charly deploy add` on a disposable pod whose add_candy NEEDS the npm builder renders
                 the overlay Containerfile with the builder stage BEFORE its main FROM and the payload
