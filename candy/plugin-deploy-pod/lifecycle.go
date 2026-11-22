@@ -140,6 +140,14 @@ func podStart(ctx context.Context, exec *sdk.Executor, p lifecycleParams) (*pb.I
 	if err := podContainerStart(ctx, exec, plan, sel); err != nil {
 		return nil, err
 	}
+	// The container is up, but supervisord's RUNNING is only the process state: a
+	// start wrapper that is still waiting on its database is RUNNING too. Run the
+	// deploy's AUTHORED probes.readiness Op before returning, so `charly start` and
+	// the `charly start` inside `charly update` both hand back a deployment that
+	// accepts work (opencharly/charly#1234).
+	if err := waitDeclaredReadiness(ctx, exec, p, plan); err != nil {
+		return nil, err
+	}
 	if plan.Tunnel != nil {
 		if err := podTunnelOp(ctx, exec, "start", plan.Tunnel); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: tunnel setup failed: %v\n", err)
