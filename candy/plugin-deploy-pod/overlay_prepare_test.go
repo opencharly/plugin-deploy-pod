@@ -20,7 +20,6 @@ import (
 // ensureStub answers build:ensure and records, for each call, whether the overlay build dir already
 // existed — the measured ordering defect is an ensure that prunes the dir created before it.
 type ensureStub struct {
-	dir     string
 	deploy  string
 	refs    []string
 	dirSeen []bool
@@ -104,7 +103,7 @@ func TestPrepareOverlayBuildEnsuresBuilderImagesBeforeCreatingTheDir(t *testing.
 	builderBox := &buildkit.ResolvedBox{ResolvedBox: spec.ResolvedBox{Name: "npm-builder", FullTag: "ghcr.io/x/npm-builder:v1"}}
 	dg := &deploykit.Generator{Boxes: map[string]*buildkit.ResolvedBox{"base": box, "npm-builder": builderBox}, Candies: map[string]deploykit.CandyModel{"web": cand}}
 
-	stub := &ensureStub{dir: work, deploy: "test"}
+	stub := &ensureStub{deploy: "test"}
 	overlayDir, err := prepareOverlayBuild(context.Background(), sdk.NewInProcExecutor(stub), dg, "base", "test", []string{"web"}, "podman", dir)
 	if err != nil {
 		t.Fatalf("prepareOverlayBuild: %v", err)
@@ -121,7 +120,7 @@ func TestPrepareOverlayBuildEnsuresBuilderImagesBeforeCreatingTheDir(t *testing.
 		t.Errorf("the overlay dir was not created: %v", err)
 	}
 
-	failing := &ensureStub{dir: work, deploy: "test2", err: fmt.Errorf("boom")}
+	failing := &ensureStub{deploy: "test2", err: fmt.Errorf("boom")}
 	if _, err := prepareOverlayBuild(context.Background(), sdk.NewInProcExecutor(failing), dg, "base", "test2", []string{"web"}, "podman", dir); err == nil {
 		t.Error("a failed builder-image ensure did not stop the overlay build")
 	}
