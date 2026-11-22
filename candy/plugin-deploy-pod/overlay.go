@@ -191,16 +191,11 @@ func buildOverlay(ctx context.Context, exec *sdk.Executor, reply spec.OverlayBui
 	// SAME Generator path the image build uses (D-IR-1, opencharly/sdk#608), with the fail-loud
 	// pre-pass (a needed builder that cannot run is an error) and the builder box resolved to its
 	// image. overlayMainStage places them.
-	var builderStages, builderArtifacts strings.Builder
-	if box != nil {
-		if err := dg.EmitBuilderStages(&builderStages, baseName, box, overlayCandies); err != nil {
-			return "", fmt.Errorf("overlay builder stages: %w", err)
-		}
-		if err := dg.EmitBuilderArtifacts(&builderArtifacts, box, overlayCandies); err != nil {
-			return "", fmt.Errorf("overlay builder artifacts: %w", err)
-		}
+	builderStages, builderArtifacts, err := emitOverlayBuilders(dg, baseName, box, overlayCandies)
+	if err != nil {
+		return "", err
 	}
-	cf.WriteString(overlayMainStage(svcStage, builderStages.String(), reply.BaseImage, builderArtifacts.String(), oci.String()))
+	cf.WriteString(overlayMainStage(svcStage, builderStages, reply.BaseImage, builderArtifacts, oci.String()))
 	// Append service fragments inside the MAIN image stage (after all candy tasks). This extends
 	// the base image's /etc/supervisord.conf instead of replacing it.
 	if svcAppend != "" {
@@ -577,4 +572,22 @@ func overlayMainStage(svcStage, builderStages, baseImage, builderArtifacts, task
 	b.WriteString(builderArtifacts)
 	b.WriteString(tasks)
 	return b.String()
+}
+
+// emitOverlayBuilders is the overlay's builder wiring: the SAME Generator path the image build uses
+// emits each overlay candy's builder stage and payload, and a needed builder the image cannot run is
+// an error rather than a silently absent stage (opencharly/sdk#608). Its own test drives it through
+// that path, so deleting the wiring fails the test rather than only the helper's.
+func emitOverlayBuilders(dg *deploykit.Generator, baseName string, box *buildkit.ResolvedBox, overlayCandies []string) (stages, artifacts string, err error) {
+	if box == nil {
+		return "", "", nil
+	}
+	var sb, ab strings.Builder
+	if err := dg.EmitBuilderStages(&sb, baseName, box, overlayCandies); err != nil {
+		return "", "", fmt.Errorf("overlay builder stages: %w", err)
+	}
+	if err := dg.EmitBuilderArtifacts(&ab, box, overlayCandies); err != nil {
+		return "", "", fmt.Errorf("overlay builder artifacts: %w", err)
+	}
+	return sb.String(), ab.String(), nil
 }
