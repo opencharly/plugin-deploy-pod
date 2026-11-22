@@ -1,0 +1,19 @@
+npm-toolchain:
+    candy:
+        description: |-
+            The node/npm toolchain an image needs to BE an npm builder box. `produce:` on an image
+            names what it can build; the producing CANDY is what installs the toolchain into it
+            (distro-arch's `arch` box composes the same pair and routes npm, cargo, pixi and aur to
+            `arch-builder`). This repo needs a builder box it can compose locally, because
+            opencharly/plugin-deploy-pod#65 blocks pulling a published one.
+        distro:
+            fedora:
+                package:
+                    - nodejs
+                    - npm
+        plan:
+            - check: npm is on PATH in the builder image
+              id: npm-toolchain-present
+              context:
+                - build
+              command: "command -v npm"

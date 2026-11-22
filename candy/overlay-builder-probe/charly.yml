@@ -1,0 +1,11 @@
+overlay-builder-probe:
+    candy:
+        description: |-
+            Fixture candy for the overlay builder bed: its package.json makes the image NEED the npm
+            builder, so an overlay composing it must render the builder stage and copy the payload in.
+        plan:
+            - check: the fixture candy is loadable
+              id: fixture-ok
+              context:
+                - build
+              command: "true"
