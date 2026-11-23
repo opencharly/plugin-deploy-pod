@@ -629,12 +629,23 @@ func podRebuild(ctx context.Context, exec *sdk.Executor, p lifecycleParams) (*pb
 	// returns nil (resolvedImage == baseImage), so the resolved ref is NOT persisted to
 	// the per-host overlay, and a tag-less `config` re-resolves the base name to the
 	// newest local CalVer — the same stale-image trap. Both legs must pin the same tag.
-	addArgs := []string{"deploy", "add", p.Name}
-	if ropts.Tag != "" {
-		addArgs = append(addArgs, "--tag", ropts.Tag)
-	}
-	if _, err := podCli(ctx, exec, false, false, addArgs...); err != nil {
-		return nil, err
+	// `deploy add` is the PROJECT route: with no `<ref>` it resolves the deploy from the
+	// project's charly.yml and persists the per-host overlay. A deploy that exists ONLY in the
+	// HOST config — created by `charly config <image>` or `deploy add <name> <ref>` — has no
+	// project entry, so that leg fails with `no <ref> and charly.yml has no entry for "<name>"`
+	// even though `charly deploy show <name>` resolves it, and `charly update` therefore cannot
+	// be used on it at all (opencharly/charly#1249). Rebuilding an EXISTING deploy does not need
+	// the project route: the `config` leg below re-renders the quadlet from the host entry, which
+	// is exactly what re-resolves the image. So run `deploy add` only when the host has no entry
+	// for this key — the fresh-deploy case the leg exists for.
+	if !podRebuildHasHostEntry(ctx, exec, p.Name) {
+		addArgs := []string{"deploy", "add", p.Name}
+		if ropts.Tag != "" {
+			addArgs = append(addArgs, "--tag", ropts.Tag)
+		}
+		if _, err := podCli(ctx, exec, false, false, addArgs...); err != nil {
+			return nil, err
+		}
 	}
 	_, _ = podCli(ctx, exec, false, true, "stop", p.Name) // best-effort (preserve config)
 	configArgs := []string{"config", p.Name}
@@ -648,6 +659,22 @@ func podRebuild(ctx context.Context, exec *sdk.Executor, p lifecycleParams) (*pb
 		return nil, err
 	}
 	return marshalReply(struct{}{})
+}
+
+// podRebuildHasHostEntry reports whether the HOST config already records this deploy key — the
+// condition that makes the `deploy add` leg both unnecessary and impossible (opencharly/charly#1249):
+// a host-config deploy has no project entry, and `config` alone re-renders it correctly.
+//
+// A config that cannot be READ is not a "no entry" answer: the caller keeps the project route in
+// that case, so a broken reverse channel surfaces as the add leg's own error rather than silently
+// skipping a fresh deploy's registration.
+func podRebuildHasHostEntry(ctx context.Context, exec *sdk.Executor, name string) bool {
+	dc, err := loadDeploy(ctx, exec, "pod rebuild host-entry check")
+	if err != nil || dc == nil {
+		return false
+	}
+	_, ok := dc.LookupKey(name)
+	return ok
 }
 
 // podPostTeardown = `charly remove` (the container teardown, via the cli seam) + drop the synthesized
