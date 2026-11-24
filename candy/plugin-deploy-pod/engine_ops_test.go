@@ -400,11 +400,8 @@ func TestPodUserNS_CDIDeviceRidesKeepID(t *testing.T) {
 
 // hasFlagName reports whether the argv carries the flag, whatever its value.
 func hasFlagName(argv []string, name string) bool {
-	for i, a := range argv {
+	for _, a := range argv {
 		if a == name || strings.HasPrefix(a, name+"=") {
-			return true
-		}
-		if a == name && i+1 < len(argv) {
 			return true
 		}
 	}
