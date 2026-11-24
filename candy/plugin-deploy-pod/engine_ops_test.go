@@ -358,6 +358,15 @@ func TestPodUserNS_CDIDeviceRidesKeepID(t *testing.T) {
 	shellArgv := buildShellArgs(sel.Target, "img", 1000, 1000, nil, nil, bindMounts, true,
 		"", "", nil, spec.SecurityConfig{}, "/", true)
 	assertKeepIDArgv(t, "buildShellArgs", shellArgv)
+	// The transient shell carries the same CDI device under the same keep-id mapping, so it must
+	// also carry the devices-only spec and the read-only library binds — otherwise it is the one
+	// container that still dies at the stock spec's first file mount.
+	if !hasFlagName(shellArgv, "--cdi-spec-dir") {
+		t.Errorf("buildShellArgs must point the engine at the derived devices-only spec: %q", shellArgv)
+	}
+	if !hasReadOnlyBind(shellArgv) {
+		t.Errorf("buildShellArgs must carry the driver libraries as read-only binds: %q", shellArgv)
+	}
 
 	execArgv := buildExecArgs(sel.Target, "charly-ctr", 1000, 1000, userNSKeepID, "", nil, "/", true)
 	if !hasFlagValue(execArgv, "--user", "1000:1000") {
@@ -387,6 +396,29 @@ func TestPodUserNS_CDIDeviceRidesKeepID(t *testing.T) {
 	if got := podGPUArgs("podman", true, false); len(got) == 0 {
 		t.Error("an unprivileged CDI deploy must still carry its device arguments")
 	}
+}
+
+// hasFlagName reports whether the argv carries the flag, whatever its value.
+func hasFlagName(argv []string, name string) bool {
+	for i, a := range argv {
+		if a == name || strings.HasPrefix(a, name+"=") {
+			return true
+		}
+		if a == name && i+1 < len(argv) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasReadOnlyBind reports whether any `-v <host>:<container>:ro` pair is present.
+func hasReadOnlyBind(argv []string) bool {
+	for i, a := range argv {
+		if a == "-v" && i+1 < len(argv) && strings.HasSuffix(argv[i+1], ":ro") {
+			return true
+		}
+	}
+	return false
 }
 
 // assertKeepIDArgv asserts the one mapping: keep-id as the deploy's user, and never userns=host.

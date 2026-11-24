@@ -213,36 +213,39 @@ func writeDevicesOnlyCDI() (string, []deploykit.ResolvedBindMount, error) {
 	return dir, libs, nil
 }
 
-// applyKeepIDGPU appends what a keep-id GPU unit needs to a quadlet config: the engine flag that
-// points podman at the derived devices-only spec, and the driver libraries as read-only binds.
-//
-// It is a no-op for a deploy that is not in the keep-id shape (no CDI device, no bind mount, or
-// privileged): those units keep the host's stock spec, whose mounts apply fine under a mapping
-// that is not keep-id. A host without a CDI spec is a no-op too — the unit is left exactly as it
-// was rather than made unstartable by a flag pointing nowhere.
-func applyKeepIDGPU(cfg *deploykit.QuadletConfig, privileged bool) error {
-	if !cfg.GPU || privileged || len(cfg.BindMounts) == 0 {
-		return nil
+// keepIDGPUInputs resolves what a keep-id GPU unit needs — the derived spec directory and the
+// library binds — or ("", nil) when the deploy is not in that shape or the host carries no CDI
+// spec. The ONE guard and the ONE fallback for both emitters: a unit with no CDI device, no bind
+// mount or `--privileged` keeps the host's stock spec, whose mounts apply fine under a mapping that
+// is not keep-id, and a failed derivation warns and leaves the unit exactly as it was rather than
+// making it unstartable by a flag pointing nowhere.
+func keepIDGPUInputs(gpu, privileged bool, bindMounts int) (string, []deploykit.ResolvedBindMount) {
+	if !gpu || privileged || bindMounts == 0 {
+		return "", nil
 	}
 	dir, libs, err := writeDevicesOnlyCDI()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: GPU libraries stay on the stock CDI spec: %v\n", err)
-		return nil
+		fmt.Fprintf(os.Stderr, "Warning: keeping the stock CDI spec: %v\n", err)
+		return "", nil
+	}
+	return dir, libs
+}
+
+// applyKeepIDGPU appends the derived spec directory and the library binds to a quadlet config.
+func applyKeepIDGPU(cfg *deploykit.QuadletConfig, privileged bool) {
+	dir, libs := keepIDGPUInputs(cfg.GPU, privileged, len(cfg.BindMounts))
+	if dir == "" {
+		return
 	}
 	cfg.PodmanArgs = append(cfg.PodmanArgs, "--cdi-spec-dir", dir)
 	cfg.BindMounts = append(cfg.BindMounts, libs...)
-	return nil
 }
 
-// keepIDGPUArgs is the argv twin of applyKeepIDGPU for the direct/systemd-unit launch: the same
-// `--cdi-spec-dir` and the same read-only library binds, expressed as engine arguments.
+// keepIDGPUArgs is the argv twin of applyKeepIDGPU for the direct/systemd-unit launch and the
+// transient `charly shell` container, which carries the same device and the same keep-id mapping.
 func keepIDGPUArgs(gpu, privileged bool, bindMounts int) []string {
-	if !gpu || privileged || bindMounts == 0 {
-		return nil
-	}
-	dir, libs, err := writeDevicesOnlyCDI()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: GPU libraries stay on the stock CDI spec: %v\n", err)
+	dir, libs := keepIDGPUInputs(gpu, privileged, bindMounts)
+	if dir == "" {
 		return nil
 	}
 	args := []string{"--cdi-spec-dir", dir}

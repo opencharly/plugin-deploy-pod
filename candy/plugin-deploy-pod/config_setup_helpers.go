@@ -928,9 +928,7 @@ func updateAllDeployedQuadlets(ctx context.Context, ex *sdk.Executor, rt *kit.Re
 			EncryptedMounts: deploykit.HasEncryptedBindMounts(bindMounts), KeyringBackend: isKeyring,
 			PodName: podName, Sidecar: resolvedSidecars,
 		}
-		if err := applyKeepIDGPU(&qcfg, security.Privileged); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: keeping the stock CDI spec for %s: %v\n", key, err)
-		}
+		applyKeepIDGPU(&qcfg, security.Privileged)
 		if quadletEnvFile != "" {
 			qcfg.Env = append([]string{}, globalEnv...)
 			qcfg.Env = appendAutoDetectedEnv(qcfg.Env, detected)

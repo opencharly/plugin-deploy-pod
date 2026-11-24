@@ -184,7 +184,7 @@ func TestVolumeRootKeepIDCoversEveryEmitter(t *testing.T) {
 			// on the podman rows — but on those it must be the SAME answer the argv emitters give,
 			// for every row including the privileged one.
 			if tc.engine == "podman" {
-				if got := volumeRootKeepID(tc.engine, tc.binds, tc.gpu, tc.priv); got != quadletEmits {
+				if got := volumeRootKeepID(tc.engine, tc.binds); got != quadletEmits {
 					t.Errorf("quadlet: volumeRootKeepID = %v but GenerateQuadlet emits keep-id = %v", got, quadletEmits)
 				}
 			}
@@ -203,9 +203,9 @@ func TestVolumeRootKeepIDCoversEveryEmitter(t *testing.T) {
 				t.Fatalf("buildStartArgs(%s): %v", tc.engine, err)
 			}
 			startEmits := hasKeepID(startArgv)
-			if want := directEmits || startEmits; volumeRootKeepID(tc.engine, tc.binds, tc.gpu, tc.priv) != want {
+			if want := directEmits || startEmits; volumeRootKeepID(tc.engine, tc.binds) != want {
 				t.Errorf("volumeRootKeepID = %v but directRunArgs emits keep-id = %v and buildStartArgs = %v",
-					volumeRootKeepID(tc.engine, tc.binds, tc.gpu, tc.priv), directEmits, startEmits)
+					volumeRootKeepID(tc.engine, tc.binds), directEmits, startEmits)
 			}
 
 			// buildShellArgs is the transient `charly run` twin of buildStartArgs and attaches the

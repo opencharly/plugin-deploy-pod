@@ -206,6 +206,10 @@ func buildShellArgs(target deploykit.ContainerdTarget, imageRef string, uid, gid
 		args = append(args, "--network", network[0])
 	}
 	args = append(args, podGPUArgs(engine, gpu, security.Privileged)...)
+	// This transient container carries the same CDI device under the same keep-id mapping as the
+	// deploy, so it needs the same devices-only spec and library binds — otherwise it dies at the
+	// stock spec's first file mount (mount_setattr EPERM, exit 126).
+	args = append(args, keepIDGPUArgs(gpu, security.Privileged, len(bindMounts))...)
 	args = append(args, deploykit.SecurityArgs(security)...)
 	for _, port := range ports {
 		args = append(args, "-p", deploykit.LocalizePort(port, bindAddr))
