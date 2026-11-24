@@ -312,92 +312,77 @@ func TestResolvePodStartSystemdUnit_StartsViaSystemctl(t *testing.T) {
 // leaves UsernsKeepIDArg empty, so nerdctl never gets podman's spelling, and a bind-only podman
 // deploy keeps it exactly as it had it.
 func TestPodUserNS_KeepIDIsTheCapabilityFact(t *testing.T) {
-	if got := podUserNSFor("containerd", false, false, 1); got.keepID() {
+	if got := podUserNSFor("containerd", 1); got.keepID() {
 		t.Errorf("containerd must not emit a keep-id argument, got mapping %v", got)
 	}
-	if got := podUserNSFor("podman", false, false, 1); !got.keepID() {
+	if got := podUserNSFor("podman", 1); !got.keepID() {
 		t.Errorf("podman's capability row declares keep-id; the bind-only podman control arm must keep it, got mapping %v", got)
 	}
-	if got := podUserNSFor("podman", false, false, 0); got != userNSImageOwn {
+	if got := podUserNSFor("podman", 0); got != userNSImageOwn {
 		t.Errorf("no bind mount means keep-id was never in play: got mapping %v", got)
 	}
 	// A PRIVILEGED gpu deploy carries no CDI device (`--privileged` IS the device grant, and the
 	// quadlet renderer has always skipped `AddDevice=` for it), so it keeps keep-id — on every
 	// emitter, which is what the cross-emitter guard in volume_root_test.go asserts.
-	if got := podUserNSFor("podman", true, true, 1); !got.keepID() {
+	if got := podUserNSFor("podman", 1); !got.keepID() {
 		t.Errorf("a privileged GPU deploy carries no CDI device and must keep keep-id, got mapping %v", got)
 	}
 }
 
-// TestPodUserNS_CDIDeviceNeverKeepID is the fix for opencharly/plugin-deploy-pod#81: a deploy that
-// carries a CDI GPU device must not run under keep-id, because crun cannot apply the device's FILE
-// mounts inside a keep-id user namespace and the container dies at the first one (mount_setattr
-// EPERM, exit 126). It runs userns=host with the workload as container root instead — the only
-// mapping under which a host-owned bind stays writable AND the device resolves.
+// TestPodUserNS_CDIDeviceRidesKeepID is the rule: **no charly pod runs as container root**, and a
+// CDI device does not change that. A unit with a bind mount runs keep-id as the deploy's own user;
+// the device rides it once the engine is pointed at a devices-only CDI spec (cdi_spec.go), which the
+// emitter does whenever the host carries a spec.
 //
-// The assertion is on the argv the emitters really produce, not only on the predicate, so a
-// call site that forgets to consult it fails here: both argv paths are checked, and the keep-id
-// spelling must be ABSENT from every one of them.
-func TestPodUserNS_CDIDeviceNeverKeepID(t *testing.T) {
+// The assertion is on the argv the emitters really produce, not only on the predicate, so a call
+// site that forgets to consult it fails here.
+func TestPodUserNS_CDIDeviceRidesKeepID(t *testing.T) {
 	const binds = 1
 	bindMounts := []deploykit.ResolvedBindMount{{Name: "data", HostPath: "/srv/data", ContPath: "/data"}}
 	sel := selectionForTest(t, deploykit.Selection{}, "podman")
 
-	// The predicate itself: the resolved deploy carries a device, so keep-id is out and the
-	// host/root mapping is in.
-	if got := podUserNSFor("podman", true, false, binds); got != userNSHostRoot {
-		t.Fatalf("a CDI deploy with a bind mount must run userns=host as container root, got mapping %v", got)
+	if got := podUserNSFor("podman", binds); got != userNSKeepID {
+		t.Fatalf("a CDI deploy with a bind mount runs keep-id as its own user, got mapping %v", got)
 	}
 
-	// `charly start` / direct-mode launch (`charly config` in direct mode).
 	startArgv, err := buildStartArgs(sel, "img", 1000, 1000, nil, "ctr", nil, bindMounts,
 		true, "", nil, spec.SecurityConfig{}, nil, "/")
 	if err != nil {
 		t.Fatalf("buildStartArgs: %v", err)
 	}
-	assertHostRootArgv(t, "buildStartArgs", startArgv)
-
-	// `charly shell` — the transient container that attaches the same bind.
-	shellArgv := buildShellArgs(sel.Target, "img", 1000, 1000, nil, nil, bindMounts, true,
-		"", "", nil, spec.SecurityConfig{}, "/", true)
-	assertHostRootArgv(t, "buildShellArgs", shellArgv)
-
-	// `charly exec` — the attach into the running container, which the deploy created as root.
-	execArgv := buildExecArgs(sel.Target, "charly-ctr", 1000, 1000, userNSHostRoot, "", nil, "/", true)
-	if !hasFlagValue(execArgv, "--user", containerRootUser) {
-		t.Errorf("buildExecArgs must attach as container root for a CDI deploy: %q", execArgv)
+	assertKeepIDArgv(t, "buildStartArgs", startArgv)
+	if !hasFlagValue(startArgv, "--device", "nvidia.com/gpu=all") {
+		t.Errorf("an unprivileged CDI deploy keeps its device argument: %q", startArgv)
 	}
 
-	// And the control: the SAME bind mounts without a GPU device keep keep-id.
+	shellArgv := buildShellArgs(sel.Target, "img", 1000, 1000, nil, nil, bindMounts, true,
+		"", "", nil, spec.SecurityConfig{}, "/", true)
+	assertKeepIDArgv(t, "buildShellArgs", shellArgv)
+	// The devices-only spec and the library binds are asserted hermetically, for all three argv
+	// builders and the quadlet config, by TestKeepIDGPUInputsReachEveryEmitter (a temp CDI spec) —
+	// this test must not depend on the host having one.
+
+	execArgv := buildExecArgs(sel.Target, "charly-ctr", 1000, 1000, userNSKeepID, "", nil, "/", true)
+	if !hasFlagValue(execArgv, "--user", "1000:1000") {
+		t.Errorf("buildExecArgs must attach as the deploy's own user: %q", execArgv)
+	}
+
 	controlArgv, err := buildStartArgs(sel, "img", 1000, 1000, nil, "ctr", nil, bindMounts,
 		false, "", nil, spec.SecurityConfig{}, nil, "/")
 	if err != nil {
 		t.Fatalf("buildStartArgs(control): %v", err)
 	}
-	if !hasFlag(controlArgv, "--userns=keep-id:uid=1000,gid=1000") {
-		t.Errorf("a bind-only deploy must keep its keep-id mapping unchanged: %q", controlArgv)
-	}
+	assertKeepIDArgv(t, "buildStartArgs(control)", controlArgv)
 
-	// A PRIVILEGED gpu deploy is the other control, and it must be consistent on BOTH sides of the
-	// emitter pair: no explicit device in the argv (the unit carries none either), and therefore
-	// the keep-id mapping the unit also emits. Before this arm existed the argv carried
-	// `--device nvidia.com/gpu=all` under keep-id — the exact combination that cannot start.
 	privSecurity := spec.SecurityConfig{Privileged: true}
 	privArgv, err := buildStartArgs(sel, "img", 1000, 1000, nil, "ctr", nil, bindMounts,
 		true, "", nil, privSecurity, nil, "/")
 	if err != nil {
 		t.Fatalf("buildStartArgs(privileged): %v", err)
 	}
-	if !hasFlag(privArgv, "--userns=keep-id:uid=1000,gid=1000") {
-		t.Errorf("a privileged GPU deploy keeps keep-id in the argv, like its unit: %q", privArgv)
-	}
+	assertKeepIDArgv(t, "buildStartArgs(privileged)", privArgv)
 	if hasFlag(privArgv, "--device") {
 		t.Errorf("a privileged launch must not add a CDI device the unit does not carry: %q", privArgv)
-	}
-	privShell := buildShellArgs(sel.Target, "img", 1000, 1000, nil, nil, bindMounts, true,
-		"", "", nil, privSecurity, "/", true)
-	if !hasFlag(privShell, "--userns=keep-id:uid=1000,gid=1000") || hasFlag(privShell, "--device") {
-		t.Errorf("charly shell must agree with charly start on a privileged deploy: %q", privShell)
 	}
 	if got := podGPUArgs("podman", true, true); got != nil {
 		t.Errorf("a privileged deploy gets no explicit GPU args, got %q", got)
@@ -407,19 +392,35 @@ func TestPodUserNS_CDIDeviceNeverKeepID(t *testing.T) {
 	}
 }
 
-// assertHostRootArgv asserts the CDI mapping in an argv: userns=host present, the workload as
-// container root, and NO keep-id spelling anywhere.
-func assertHostRootArgv(t *testing.T, who string, argv []string) {
-	t.Helper()
-	if !hasFlagValue(argv, "--userns", "host") && !hasFlag(argv, "--userns=host") {
-		t.Errorf("%s: expected userns=host, got %q", who, argv)
+// hasFlagName reports whether the argv carries the flag, whatever its value.
+func hasFlagName(argv []string, name string) bool {
+	for _, a := range argv {
+		if a == name || strings.HasPrefix(a, name+"=") {
+			return true
+		}
 	}
-	if !hasFlagValue(argv, "--user", containerRootUser) {
-		t.Errorf("%s: expected the workload as container root (--user %s), got %q", who, containerRootUser, argv)
+	return false
+}
+
+// hasReadOnlyBind reports whether any `-v <host>:<container>:ro` pair is present.
+func hasReadOnlyBind(argv []string) bool {
+	for i, a := range argv {
+		if a == "-v" && i+1 < len(argv) && strings.HasSuffix(argv[i+1], ":ro") {
+			return true
+		}
+	}
+	return false
+}
+
+// assertKeepIDArgv asserts the one mapping: keep-id as the deploy's user, and never userns=host.
+func assertKeepIDArgv(t *testing.T, who string, argv []string) {
+	t.Helper()
+	if !hasFlag(argv, "--userns=keep-id:uid=1000,gid=1000") {
+		t.Errorf("%s: expected keep-id as the deploy's user, got %q", who, argv)
 	}
 	for _, a := range argv {
-		if strings.HasPrefix(a, "--userns=keep-id") {
-			t.Errorf("%s: a CDI deploy must not carry a keep-id mapping, got %q", who, argv)
+		if a == "--userns=host" {
+			t.Errorf("%s: no charly pod may run as container root, got %q", who, argv)
 		}
 	}
 }

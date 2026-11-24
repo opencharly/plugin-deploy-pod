@@ -288,7 +288,7 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, s
 	// emission path below (the direct return and the quadlet write) and before any start, so the
 	// ownership is right however the container is created; `charly remove` keeps named volumes, so
 	// the re-run of an existing deploy is the normal case this must repair.
-	if err := reconcileNamedVolumeRoots(ctx, ex, string(sel.Engine), volumeRootKeepID(string(sel.Engine), len(bindMounts), detected.GPU, security.Privileged), uid, gid, imageRef, volumes); err != nil {
+	if err := reconcileNamedVolumeRoots(ctx, ex, string(sel.Engine), volumeRootKeepID(string(sel.Engine), len(bindMounts)), uid, gid, imageRef, volumes); err != nil {
 		return err
 	}
 
@@ -449,6 +449,9 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, s
 		EncryptedMounts: deploykit.HasEncryptedBindMounts(bindMounts), KeyringBackend: isKeyring,
 		PodName: podName, Sidecar: resolvedSidecars,
 	}
+	// A keep-id GPU unit needs the derived devices-only CDI spec and the driver-library binds; a
+	// no-op for every other shape (cdi_spec.go).
+	applyKeepIDGPU(&qcfg, security.Privileged)
 
 	if quadletEnvFile != "" {
 		qcfg.Env = append([]string{}, globalEnv...)

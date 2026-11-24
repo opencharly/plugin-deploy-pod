@@ -599,8 +599,11 @@ func directRunArgs(qcfg deploykit.QuadletConfig, bindMounts []deploykit.Resolved
 		Image: qcfg.ImageRef, Name: name, Network: network,
 		Hostname: name, Restart: "always",
 		Detach: true,
-		UserNS: podUserNSFor(string(sel.Engine), qcfg.GPU, qcfg.Security.Privileged, len(bindMounts)),
-		UID:    qcfg.UID, GID: qcfg.GID,
+		UserNS: podUserNSFor(string(sel.Engine), len(bindMounts)),
+		// The direct launch carries the same CDI device under the same keep-id mapping, so it needs
+		// the derived devices-only spec and the read-only library binds (cdi_spec.go).
+		ExtraArgs: keepIDGPUArgs(qcfg.GPU, qcfg.Security.Privileged, len(bindMounts)),
+		UID:       qcfg.UID, GID: qcfg.GID,
 		// The GPU fact reaches the launch here as it does in every other emitter: without it the
 		// direct-mode argv carried no device while the deploy's own config said it had one, so
 		// the user-namespace rule above would have been decided over a device that was never
@@ -928,6 +931,7 @@ func updateAllDeployedQuadlets(ctx context.Context, ex *sdk.Executor, rt *kit.Re
 			EncryptedMounts: deploykit.HasEncryptedBindMounts(bindMounts), KeyringBackend: isKeyring,
 			PodName: podName, Sidecar: resolvedSidecars,
 		}
+		applyKeepIDGPU(&qcfg, security.Privileged)
 		if quadletEnvFile != "" {
 			qcfg.Env = append([]string{}, globalEnv...)
 			qcfg.Env = appendAutoDetectedEnv(qcfg.Env, detected)
@@ -1160,7 +1164,7 @@ func buildStartArgs(sel podSelection, imageRef string, uid, gid int, ports []str
 		Image: imageRef, Name: name, Network: net,
 		WorkingDir: workingDir, Hostname: name,
 		Detach: true, Remove: true,
-		UserNS: podUserNSFor(string(sel.Engine), gpu, security.Privileged, len(bindMounts)),
+		UserNS: podUserNSFor(string(sel.Engine), len(bindMounts)),
 		UID:    uid, GID: gid,
 		Ports:      localizedPorts(ports, bindAddr),
 		Volumes:    volumeArgs(volumes, bindMounts),
@@ -1168,6 +1172,7 @@ func buildStartArgs(sel podSelection, imageRef string, uid, gid int, ports []str
 		Security:   security,
 		GPU:        gpu,
 		Entrypoint: entrypoint,
+		ExtraArgs:  keepIDGPUArgs(gpu, security.Privileged, len(bindMounts)),
 	})
 	return argv, err
 }

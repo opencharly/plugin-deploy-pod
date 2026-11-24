@@ -149,8 +149,9 @@ func TestVolumeRootReconcileArgsIsShellSafe(t *testing.T) {
 // sdk (which cannot import this package) so its mirror is compared against the renderer's real
 // output. Nothing is left to drift.
 //
-// The GPU rows are the opencharly/plugin-deploy-pod#81 half: a deploy that carries the CDI device
-// emits keep-id from NONE of the emitters, which is what makes the reconcile run for it.
+// The GPU rows are the non-root half: a deploy that carries the CDI device emits keep-id from EVERY
+// emitter — the device rides keep-id with a devices-only CDI spec, so the volume root reconcile
+// still applies.
 func TestVolumeRootKeepIDCoversEveryEmitter(t *testing.T) {
 	for _, tc := range []struct {
 		name, engine string
@@ -163,7 +164,7 @@ func TestVolumeRootKeepIDCoversEveryEmitter(t *testing.T) {
 		{name: "docker, runtime user, bind mounts", engine: "docker", uid: 1000, binds: 1},
 		{name: "containerd, runtime user, bind mounts", engine: "containerd", uid: 1000, binds: 1},
 		{name: "docker, container root, bind mounts", engine: "docker", uid: 0, binds: 1},
-		// The CDI-device rows: no emitter may emit keep-id.
+		// The CDI-device rows: every emitter must emit keep-id.
 		{name: "podman, cdi device, bind mounts", engine: "podman", uid: 1000, binds: 1, gpu: true},
 		{name: "podman, cdi device, no bind mounts", engine: "podman", uid: 1000, binds: 0, gpu: true},
 		// A privileged unit gets every device through --privileged and never receives a CDI
@@ -183,7 +184,7 @@ func TestVolumeRootKeepIDCoversEveryEmitter(t *testing.T) {
 			// on the podman rows — but on those it must be the SAME answer the argv emitters give,
 			// for every row including the privileged one.
 			if tc.engine == "podman" {
-				if got := volumeRootKeepID(tc.engine, tc.binds, tc.gpu, tc.priv); got != quadletEmits {
+				if got := volumeRootKeepID(tc.engine, tc.binds); got != quadletEmits {
 					t.Errorf("quadlet: volumeRootKeepID = %v but GenerateQuadlet emits keep-id = %v", got, quadletEmits)
 				}
 			}
@@ -202,9 +203,9 @@ func TestVolumeRootKeepIDCoversEveryEmitter(t *testing.T) {
 				t.Fatalf("buildStartArgs(%s): %v", tc.engine, err)
 			}
 			startEmits := hasKeepID(startArgv)
-			if want := directEmits || startEmits; volumeRootKeepID(tc.engine, tc.binds, tc.gpu, tc.priv) != want {
+			if want := directEmits || startEmits; volumeRootKeepID(tc.engine, tc.binds) != want {
 				t.Errorf("volumeRootKeepID = %v but directRunArgs emits keep-id = %v and buildStartArgs = %v",
-					volumeRootKeepID(tc.engine, tc.binds, tc.gpu, tc.priv), directEmits, startEmits)
+					volumeRootKeepID(tc.engine, tc.binds), directEmits, startEmits)
 			}
 
 			// buildShellArgs is the transient `charly run` twin of buildStartArgs and attaches the
@@ -227,9 +228,10 @@ func TestVolumeRootKeepIDCoversEveryEmitter(t *testing.T) {
 				t.Errorf("argv and quadlet disagree on keep-id: GenerateQuadlet=%v buildStartArgs=%v",
 					quadletEmits, startEmits)
 			}
-			// And a deploy that carries the CDI device is emitted with NO keep-id mapping by ANY
-			// emitter — the point of opencharly/plugin-deploy-pod#81.
-			if tc.gpu && !tc.priv {
+			// And a deploy that carries the CDI device is emitted WITH the keep-id mapping by
+			// EVERY emitter: no charly pod runs as container root, and the device rides keep-id
+			// once the engine is pointed at a devices-only spec (cdi_spec.go).
+			if tc.gpu && !tc.priv && tc.binds > 0 {
 				for _, e := range []struct {
 					name string
 					got  bool
@@ -239,8 +241,8 @@ func TestVolumeRootKeepIDCoversEveryEmitter(t *testing.T) {
 					{"buildStartArgs", startEmits},
 					{"buildShellArgs", shell},
 				} {
-					if e.got {
-						t.Errorf("%s emits keep-id for a deploy that carries the CDI device", e.name)
+					if !e.got {
+						t.Errorf("%s must emit keep-id for a deploy that carries the CDI device", e.name)
 					}
 				}
 			}

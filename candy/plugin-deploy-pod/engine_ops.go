@@ -103,13 +103,6 @@ func engineRunArgv(target deploykit.ContainerdTarget, r podEngineRun) ([]string,
 		ExtraArgs: extra,
 		ImageArgs: r.Entrypoint,
 	}
-	// The host/container-root mapping is a REQUEST fact, not an ExtraArgs string: the engine's
-	// start_plan body owns the spelling of `--userns host` and `--user`, so a second spelling
-	// here could drift from the engine it is launched on.
-	if r.UserNS.hostRoot() {
-		req.UsernsHost = true
-		req.WorkloadUser = containerRootUser
-	}
 	params, err := json.Marshal(req)
 	if err != nil {
 		return nil, "", err
@@ -294,37 +287,15 @@ const (
 	// user is mapped into the container, so a host-owned bind mount stays writable by the
 	// deploy's own uid.
 	userNSKeepID
-	// userNSHostRoot is `--userns=host` with the workload as CONTAINER ROOT. A deploy that
-	// carries a CDI GPU device must not use keep-id: crun cannot apply the device's ~62 FILE
-	// mounts inside a keep-id user namespace, and the container dies at the first one —
-	// `mount_setattr /usr/bin/nvidia-cuda-mps-control: Operation not permitted: OCI permission
-	// denied`, exit 126 (opencharly/plugin-deploy-pod#81). userns=host with the workload as
-	// container root is the ONE mapping under which a host-owned bind stays writable AND the
-	// device resolves; in a rootless pod that "root" is still the unprivileged host user, so the
-	// files the workload creates land owned by that user (measured: `ls -ln` shows 1000 1000).
-	userNSHostRoot
+	// There is no container-root arm: **no charly pod runs as container root** (D-HW-10 — a
+	// deployment is rootless unless its stack declares `privilege: rootful`, and a bind mount is
+	// not such a need). `userns=host` with `--user 0:0` was the old answer for a CDI device plus a
+	// host-owned bind; keep-id as the image user is the answer, and the device rides it with a
+	// devices-only CDI spec (cdi_spec.go).
 )
-
-// containerRootUser is the workload user spelling for userNSHostRoot. Both ids are named: the
-// bind's files must land with the host user's uid AND gid, and podman's `--user 0` alone leaves
-// the gid to the image's own declaration.
-const containerRootUser = "0:0"
 
 // keepID reports whether this mapping is the keep-id one.
 func (m podUserNS) keepID() bool { return m == userNSKeepID }
-
-// hostRoot reports whether this mapping is userns=host with the workload as container root.
-func (m podUserNS) hostRoot() bool { return m == userNSHostRoot }
-
-// podCarriesCDIDevice is the ONE fact the mapping and the device injection are both decided on:
-// this launch/unit carries a CDI GPU device. A privileged deploy does not — `--privileged` IS the
-// device grant, and the quadlet renderer has always skipped `AddDevice=` for it, so the argv now
-// matches the unit instead of passing a redundant `--device` the unit does not have. Before this
-// the two emitters answered this differently, which is how a privileged GPU+bind deploy got
-// `userns=host` in the argv and `keep-id` in the unit.
-func podCarriesCDIDevice(engine string, gpu, privileged bool) bool {
-	return gpu && !privileged && engineUsesCDI(engine)
-}
 
 // podGPUArgs returns the engine's GPU passthrough arguments for this deploy, or nil when it asks
 // for no GPU or already holds every device through --privileged. It is the argv twin of the
@@ -342,14 +313,12 @@ func podGPUArgs(engine string, gpu, privileged bool) []string {
 //
 // keep-id exists to make a host-owned bind writable, so it is only ever in play when a bind mount
 // exists; a deploy with no bind mount keeps the mapping it has today (measured: `--device` alone
-// starts, and the CDI mounts apply fine under the default mapping). A bind-only deploy keeps
-// keep-id EXACTLY as it is today, and so does a privileged one — nothing about either changes.
-func podUserNSFor(engine string, gpu, privileged bool, bindMounts int) podUserNS {
+// starts, and the CDI mounts apply fine under the default mapping). Neither the device nor
+// privilege changes this: a CDI device rides a keep-id unit once the engine is pointed at a
+// devices-only spec (cdi_spec.go), and a privileged unit takes no explicit device at all.
+func podUserNSFor(engine string, bindMounts int) podUserNS {
 	if bindMounts == 0 {
 		return userNSImageOwn
-	}
-	if podCarriesCDIDevice(engine, gpu, privileged) {
-		return userNSHostRoot
 	}
 	c, ok := container.EngineCapabilityFor(engine)
 	if !ok || !c.SupportsUsernsKeepID || c.UsernsKeepIDArg == "" {

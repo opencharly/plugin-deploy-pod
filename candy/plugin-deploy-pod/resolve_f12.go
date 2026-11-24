@@ -68,7 +68,7 @@ func resolvePodShellPlan(ctx context.Context, ex *sdk.Executor, box, instance st
 	if containerRunningLocal(sel.Target, name) {
 		execEnv := append(append([]string{}, envVars...), agentFwd.Env...)
 		workDir := deploykit.ResolveWorkingDir(volumes, bindMounts, home, box, instance)
-		userNS := podUserNSFor(string(sel.Engine), detected.GPU, security.Privileged, len(bindMounts))
+		userNS := podUserNSFor(string(sel.Engine), len(bindMounts))
 		argv := buildExecArgs(sel.Target, name, uid, gid, userNS, command, execEnv, workDir, opts.Interactive)
 		return &spec.PodLiveStdioPlan{Script: hostAttachScript(argv, opts.WrapPTY)}, nil
 	}
@@ -192,14 +192,11 @@ func buildShellArgs(target deploykit.ContainerdTarget, imageRef string, uid, gid
 	if interactive {
 		interactiveFlag = "-it"
 	}
-	// The user-namespace mapping decides the USER too: under userns=host the deploy's own uid
-	// maps to a subuid and cannot write the host-owned bind, so the transient container runs as
-	// container root — the same mapping the emitted unit carries (engine_ops.go, podUserNSFor).
-	userNS := podUserNSFor(engine, gpu, security.Privileged, len(bindMounts))
+	// The workload user is the deploy's own: no charly pod runs as container root, and under
+	// keep-id that user IS the invoking host user, so the host-owned bind stays writable. The
+	// mapping is the same one the emitted unit carries (engine_ops.go, podUserNSFor).
+	userNS := podUserNSFor(engine, len(bindMounts))
 	user := fmt.Sprintf("%d:%d", uid, gid)
-	if userNS.hostRoot() {
-		user = containerRootUser
-	}
 	args := []string{
 		binary, "run", "--rm", interactiveFlag,
 		"-w", workingDir,
@@ -209,6 +206,10 @@ func buildShellArgs(target deploykit.ContainerdTarget, imageRef string, uid, gid
 		args = append(args, "--network", network[0])
 	}
 	args = append(args, podGPUArgs(engine, gpu, security.Privileged)...)
+	// This transient container carries the same CDI device under the same keep-id mapping as the
+	// deploy, so it needs the same devices-only spec and library binds — otherwise it dies at the
+	// stock spec's first file mount (mount_setattr EPERM, exit 126).
+	args = append(args, keepIDGPUArgs(gpu, security.Privileged, len(bindMounts))...)
 	args = append(args, deploykit.SecurityArgs(security)...)
 	for _, port := range ports {
 		args = append(args, "-p", deploykit.LocalizePort(port, bindAddr))
@@ -226,11 +227,8 @@ func buildShellArgs(target deploykit.ContainerdTarget, imageRef string, uid, gid
 			args = append(args, "-v", m)
 		}
 	}
-	switch {
-	case userNS.keepID():
+	if userNS.keepID() {
 		args = append(args, fmt.Sprintf("--userns=keep-id:uid=%d,gid=%d", uid, gid))
-	case userNS.hostRoot():
-		args = append(args, "--userns=host")
 	}
 	args = append(args, envArgs(envVars)...)
 	args = append(args, "--entrypoint", "bash", imageRef)
@@ -247,13 +245,8 @@ func buildExecArgs(target deploykit.ContainerdTarget, name string, uid, gid int,
 	if interactive {
 		interactiveFlag = "-it"
 	}
-	// An attach must use the SAME workload user the container was created with: a CDI deploy
-	// runs as container root, and demoting the attach to the deploy's uid would leave it unable
-	// to write the bind the deploy exists for.
+	// An attach uses the SAME workload user the container was created with — the deploy's own.
 	user := fmt.Sprintf("%d:%d", uid, gid)
-	if userNS.hostRoot() {
-		user = containerRootUser
-	}
 	args := []string{
 		binary, "exec", interactiveFlag,
 		"--user", user,
