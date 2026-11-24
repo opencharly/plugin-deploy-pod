@@ -240,6 +240,14 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, s
 	_, _ = migratePlaintextEnvSecret(ctx, ex, dc, &meta, c.Box, c.Instance)
 	c.Env, _ = scrubSecretCLIEnv(ctx, ex, c.Env, &meta)
 
+	// Every per-deploy overlay writer below creates the entry from nothing on a first-time config,
+	// and each write passes deploykit's degraded-load guard, which refuses a file holding an entry
+	// the loader cannot read. `image:` is what makes a pod deploy loadable, so it goes first, in its
+	// own locked mutation, before ports / caps / volumes (plugin-deploy-pod#93).
+	if err := ensureDeployEntryImage(ctx, ex, &dc, spec.DeployKey(c.Box, c.Instance), imageRef); err != nil {
+		return err
+	}
+
 	if err := persistResourceCaps(ctx, ex, &dc, c); err != nil {
 		return fmt.Errorf("persisting resource caps: %w", err)
 	}

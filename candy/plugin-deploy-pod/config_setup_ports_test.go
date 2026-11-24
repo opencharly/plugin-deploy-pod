@@ -119,3 +119,74 @@ func TestResolveDeployPorts_NoPortsIsNoop(t *testing.T) {
 		t.Error("resolveDeployPorts() called saveDeploy for a portless deploy — want a no-op")
 	}
 }
+
+// TestEnsureDeployEntryImage_FirstConfigStaysWritable is the plugin-deploy-pod#93 regression arm.
+// A deploy absent from the per-host config gets its `image:` in its own locked mutation BEFORE the
+// other per-deploy writers, so every later write in the same `charly config` run — and every retry
+// — passes deploykit's degraded-load guard instead of refusing on an entry the loader cannot read.
+// Before the fix, resolveDeployPorts created the entry with `resolved_port:` alone and the
+// project-volume write then failed with "N deploy entr(y|ies) but only M load", which made the
+// deploy permanently unconfigurable.
+func TestEnsureDeployEntryImage_FirstConfigStaysWritable(t *testing.T) {
+	saveStub := &saveDeployStub{}
+	saveStub.install(t)
+	fake := &fakeVolumeExecutorServiceClient{}
+	ex := sdk.NewInProcExecutor(fake)
+	key := spec.DeployKey("nrgenproof", "")
+	const image = "ghcr.io/opencharly/immich-cdi:2026.328.1448"
+
+	var dc *deploykit.DeployConfig // no per-host overlay yet: a first-time config
+
+	if err := ensureDeployEntryImage(context.Background(), ex, &dc, key, image); err != nil {
+		t.Fatalf("ensureDeployEntryImage() error = %v", err)
+	}
+	entry, ok := dc.Deploy[key]
+	if !ok || entry.Image != image {
+		t.Fatalf("entry after ensure = %+v (present=%v), want image %q — an entry without `image:` cannot load, and the next writer is then refused", entry, ok, image)
+	}
+
+	// The writers that follow in the same run must preserve it.
+	if err := resolveDeployPorts(context.Background(), ex, &dc, key, &spec.BoxMetadata{Port: []string{"2283"}}); err != nil {
+		t.Fatalf("resolveDeployPorts() after ensure error = %v", err)
+	}
+	entry = dc.Deploy[key]
+	if entry.Image != image {
+		t.Errorf("image = %q after port resolution, want %q preserved", entry.Image, image)
+	}
+	if len(entry.ResolvedPort) != 1 {
+		t.Errorf("ResolvedPort = %v, want one resolved pin", entry.ResolvedPort)
+	}
+}
+
+// TestEnsureDeployEntryImage_HealsPartialAndLeavesComplete proves the other two dispositions: an
+// entry an older run left with `resolved_port:` only is healed, and a complete entry is left
+// untouched (the mutation reports no change, so nothing is written).
+func TestEnsureDeployEntryImage_HealsPartialAndLeavesComplete(t *testing.T) {
+	ex := sdk.NewInProcExecutor(&fakeVolumeExecutorServiceClient{})
+	key := spec.DeployKey("legacy", "")
+	const image = "ghcr.io/opencharly/immich-cdi:2026.328.1448"
+
+	t.Run("partial entry is healed", func(t *testing.T) {
+		dc := &deploykit.DeployConfig{Deploy: map[string]spec.DeployNode{key: {ResolvedPort: []spec.PortPin{"2283:2283"}}}}
+		saveStub := &saveDeployStub{disk: dc}
+		saveStub.install(t)
+		if err := ensureDeployEntryImage(context.Background(), ex, &dc, key, image); err != nil {
+			t.Fatalf("ensureDeployEntryImage() error = %v", err)
+		}
+		if got := dc.Deploy[key].Image; got != image {
+			t.Errorf("image = %q, want %q (the partial entry must be healed)", got, image)
+		}
+	})
+
+	t.Run("complete entry is untouched", func(t *testing.T) {
+		dc := &deploykit.DeployConfig{Deploy: map[string]spec.DeployNode{key: {Image: image}}}
+		saveStub := &saveDeployStub{disk: dc}
+		saveStub.install(t)
+		if err := ensureDeployEntryImage(context.Background(), ex, &dc, key, image); err != nil {
+			t.Fatalf("ensureDeployEntryImage() error = %v", err)
+		}
+		if saveStub.called {
+			t.Error("ensureDeployEntryImage() wrote an entry that already carried its image — want a no-op")
+		}
+	})
+}
