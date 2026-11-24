@@ -347,6 +347,39 @@ func persistResourceCaps(ctx context.Context, ex *sdk.Executor, dc **deploykit.D
 // resolution (and, as a side effect, every other per-deploy overlay merge downstream in
 // MergeDeployOntoMetadata, which shares the same dc.Deploy-nil guard) run correctly on a bed's
 // very first config, matching every subsequent config/update.
+// ensureDeployEntryImage writes the resolved image onto a deploy entry that carries none, in its
+// own locked mutation, BEFORE any other per-deploy overlay writer runs.
+//
+// `image:` is mandatory on a pod deploy, and deploykit.SaveDeployConfig's degraded-load guard
+// refuses to write a file that holds an entry the loader cannot read. On a first-time
+// `charly config` every writer in this run creates the entry from nothing — ports, then resource
+// caps, then project-declared volumes — so without this the first writer leaves an unloadable
+// entry (`resolved_port:` with no `image:`) and the next one fails with "N deploy entr(y|ies) but
+// only M load"; every retry recreates it. The deploy can never be configured
+// (opencharly/plugin-deploy-pod#93). It also heals an entry an older run left partial.
+//
+// A no-op when the entry already carries its image (returns false from the mutation, so nothing is
+// written).
+func ensureDeployEntryImage(ctx context.Context, ex *sdk.Executor, dc **deploykit.DeployConfig, key, image string) error {
+	if image == "" {
+		return nil
+	}
+	fresh, err := mutateDeploy(ctx, ex, "charly config deploy-entry-image", func(d *deploykit.DeployConfig) (bool, error) {
+		entry := d.Deploy[key]
+		if entry.Image != "" {
+			return false, nil
+		}
+		entry.Image = image
+		d.Deploy[key] = entry
+		return true, nil
+	})
+	if err != nil {
+		return fmt.Errorf("writing the deploy entry's image: %w", err)
+	}
+	*dc = fresh
+	return nil
+}
+
 func resolveDeployPorts(ctx context.Context, ex *sdk.Executor, dc **deploykit.DeployConfig, key string, meta *spec.BoxMetadata, cliPins ...string) error {
 	containerPorts := kit.ContainerPortsFromMappings(meta.Port)
 	var resolved []string
