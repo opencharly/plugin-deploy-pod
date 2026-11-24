@@ -29,8 +29,9 @@ import (
 
 // hostCDISpecPath is the toolkit's default NVIDIA spec. A host with a different one can still be
 // served: the derivation reads whatever `nvidia-ctk` wrote, and an absent file simply means there
-// is nothing to derive (the caller then leaves the unit as it was).
-const hostCDISpecPath = "/etc/cdi/nvidia.yaml"
+// is nothing to derive (the caller then leaves the unit as it was). A variable, not a constant, so
+// a test can point it at a fixture instead of depending on the host's GPU.
+var hostCDISpecPath = "/etc/cdi/nvidia.yaml"
 
 type cdiSpecFile struct {
 	CDIVersion string       `yaml:"cdiVersion"`

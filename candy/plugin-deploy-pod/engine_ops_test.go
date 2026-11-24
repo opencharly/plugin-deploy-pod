@@ -358,15 +358,9 @@ func TestPodUserNS_CDIDeviceRidesKeepID(t *testing.T) {
 	shellArgv := buildShellArgs(sel.Target, "img", 1000, 1000, nil, nil, bindMounts, true,
 		"", "", nil, spec.SecurityConfig{}, "/", true)
 	assertKeepIDArgv(t, "buildShellArgs", shellArgv)
-	// The transient shell carries the same CDI device under the same keep-id mapping, so it must
-	// also carry the devices-only spec and the read-only library binds — otherwise it is the one
-	// container that still dies at the stock spec's first file mount.
-	if !hasFlagName(shellArgv, "--cdi-spec-dir") {
-		t.Errorf("buildShellArgs must point the engine at the derived devices-only spec: %q", shellArgv)
-	}
-	if !hasReadOnlyBind(shellArgv) {
-		t.Errorf("buildShellArgs must carry the driver libraries as read-only binds: %q", shellArgv)
-	}
+	// The devices-only spec and the library binds are asserted hermetically, for all three argv
+	// builders and the quadlet config, by TestKeepIDGPUInputsReachEveryEmitter (a temp CDI spec) —
+	// this test must not depend on the host having one.
 
 	execArgv := buildExecArgs(sel.Target, "charly-ctr", 1000, 1000, userNSKeepID, "", nil, "/", true)
 	if !hasFlagValue(execArgv, "--user", "1000:1000") {

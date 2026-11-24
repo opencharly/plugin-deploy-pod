@@ -600,7 +600,10 @@ func directRunArgs(qcfg deploykit.QuadletConfig, bindMounts []deploykit.Resolved
 		Hostname: name, Restart: "always",
 		Detach: true,
 		UserNS: podUserNSFor(string(sel.Engine), len(bindMounts)),
-		UID:    qcfg.UID, GID: qcfg.GID,
+		// The direct launch carries the same CDI device under the same keep-id mapping, so it needs
+		// the derived devices-only spec and the read-only library binds (cdi_spec.go).
+		ExtraArgs: keepIDGPUArgs(qcfg.GPU, qcfg.Security.Privileged, len(bindMounts)),
+		UID:       qcfg.UID, GID: qcfg.GID,
 		// The GPU fact reaches the launch here as it does in every other emitter: without it the
 		// direct-mode argv carried no device while the deploy's own config said it had one, so
 		// the user-namespace rule above would have been decided over a device that was never
