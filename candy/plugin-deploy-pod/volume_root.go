@@ -53,7 +53,7 @@ const volumeRootScratchPath = "/charly-volume-root"
 // It IS the one decision, not a copy of it: a quadlet run mode resolves to podman, which is what
 // `engine` already names, so no per-mode branch is needed.
 func volumeRootKeepID(engine string, bindMounts int, gpu, privileged bool) bool {
-	return podUserNSFor(engine, gpu, privileged, bindMounts).keepID()
+	return podUserNSFor(engine, bindMounts).keepID()
 }
 
 // volumeRootReconcileArgs builds the argv of the throwaway container that gives one named volume a

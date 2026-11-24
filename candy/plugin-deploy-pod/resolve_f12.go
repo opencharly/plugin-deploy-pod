@@ -68,7 +68,7 @@ func resolvePodShellPlan(ctx context.Context, ex *sdk.Executor, box, instance st
 	if containerRunningLocal(sel.Target, name) {
 		execEnv := append(append([]string{}, envVars...), agentFwd.Env...)
 		workDir := deploykit.ResolveWorkingDir(volumes, bindMounts, home, box, instance)
-		userNS := podUserNSFor(string(sel.Engine), detected.GPU, security.Privileged, len(bindMounts))
+		userNS := podUserNSFor(string(sel.Engine), len(bindMounts))
 		argv := buildExecArgs(sel.Target, name, uid, gid, userNS, command, execEnv, workDir, opts.Interactive)
 		return &spec.PodLiveStdioPlan{Script: hostAttachScript(argv, opts.WrapPTY)}, nil
 	}
@@ -195,7 +195,7 @@ func buildShellArgs(target deploykit.ContainerdTarget, imageRef string, uid, gid
 	// The workload user is the deploy's own: no charly pod runs as container root, and under
 	// keep-id that user IS the invoking host user, so the host-owned bind stays writable. The
 	// mapping is the same one the emitted unit carries (engine_ops.go, podUserNSFor).
-	userNS := podUserNSFor(engine, gpu, security.Privileged, len(bindMounts))
+	userNS := podUserNSFor(engine, len(bindMounts))
 	user := fmt.Sprintf("%d:%d", uid, gid)
 	args := []string{
 		binary, "run", "--rm", interactiveFlag,

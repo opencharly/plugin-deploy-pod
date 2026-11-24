@@ -312,19 +312,19 @@ func TestResolvePodStartSystemdUnit_StartsViaSystemctl(t *testing.T) {
 // leaves UsernsKeepIDArg empty, so nerdctl never gets podman's spelling, and a bind-only podman
 // deploy keeps it exactly as it had it.
 func TestPodUserNS_KeepIDIsTheCapabilityFact(t *testing.T) {
-	if got := podUserNSFor("containerd", false, false, 1); got.keepID() {
+	if got := podUserNSFor("containerd", 1); got.keepID() {
 		t.Errorf("containerd must not emit a keep-id argument, got mapping %v", got)
 	}
-	if got := podUserNSFor("podman", false, false, 1); !got.keepID() {
+	if got := podUserNSFor("podman", 1); !got.keepID() {
 		t.Errorf("podman's capability row declares keep-id; the bind-only podman control arm must keep it, got mapping %v", got)
 	}
-	if got := podUserNSFor("podman", false, false, 0); got != userNSImageOwn {
+	if got := podUserNSFor("podman", 0); got != userNSImageOwn {
 		t.Errorf("no bind mount means keep-id was never in play: got mapping %v", got)
 	}
 	// A PRIVILEGED gpu deploy carries no CDI device (`--privileged` IS the device grant, and the
 	// quadlet renderer has always skipped `AddDevice=` for it), so it keeps keep-id — on every
 	// emitter, which is what the cross-emitter guard in volume_root_test.go asserts.
-	if got := podUserNSFor("podman", true, true, 1); !got.keepID() {
+	if got := podUserNSFor("podman", 1); !got.keepID() {
 		t.Errorf("a privileged GPU deploy carries no CDI device and must keep keep-id, got mapping %v", got)
 	}
 }
@@ -341,7 +341,7 @@ func TestPodUserNS_CDIDeviceRidesKeepID(t *testing.T) {
 	bindMounts := []deploykit.ResolvedBindMount{{Name: "data", HostPath: "/srv/data", ContPath: "/data"}}
 	sel := selectionForTest(t, deploykit.Selection{}, "podman")
 
-	if got := podUserNSFor("podman", true, false, binds); got != userNSKeepID {
+	if got := podUserNSFor("podman", binds); got != userNSKeepID {
 		t.Fatalf("a CDI deploy with a bind mount runs keep-id as its own user, got mapping %v", got)
 	}
 

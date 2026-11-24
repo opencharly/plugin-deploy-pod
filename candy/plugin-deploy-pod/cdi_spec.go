@@ -53,9 +53,11 @@ type cdiSpecEdit struct {
 }
 
 type cdiDeviceNode struct {
-	Path        string `yaml:"path"`
-	Major       int64  `yaml:"major,omitempty"`
-	Minor       int64  `yaml:"minor,omitempty"`
+	Path string `yaml:"path"`
+	// No omitempty on the numbers: a node CAN have minor 0 (/dev/nvidia0), and emitting it as
+	// absent is a latent difference from the host's own spec.
+	Major       int64  `yaml:"major"`
+	Minor       int64  `yaml:"minor"`
 	FileMode    *int   `yaml:"fileMode,omitempty"`
 	Permissions string `yaml:"permissions,omitempty"`
 	UID         *int   `yaml:"uid,omitempty"`

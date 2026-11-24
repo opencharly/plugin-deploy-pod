@@ -313,9 +313,10 @@ func podGPUArgs(engine string, gpu, privileged bool) []string {
 //
 // keep-id exists to make a host-owned bind writable, so it is only ever in play when a bind mount
 // exists; a deploy with no bind mount keeps the mapping it has today (measured: `--device` alone
-// starts, and the CDI mounts apply fine under the default mapping). A CDI device does NOT change
-// this: it rides a keep-id unit once the engine is pointed at a devices-only spec (cdi_spec.go).
-func podUserNSFor(engine string, gpu, privileged bool, bindMounts int) podUserNS {
+// starts, and the CDI mounts apply fine under the default mapping). Neither the device nor
+// privilege changes this: a CDI device rides a keep-id unit once the engine is pointed at a
+// devices-only spec (cdi_spec.go), and a privileged unit takes no explicit device at all.
+func podUserNSFor(engine string, bindMounts int) podUserNS {
 	if bindMounts == 0 {
 		return userNSImageOwn
 	}
