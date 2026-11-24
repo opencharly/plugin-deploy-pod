@@ -192,14 +192,11 @@ func buildShellArgs(target deploykit.ContainerdTarget, imageRef string, uid, gid
 	if interactive {
 		interactiveFlag = "-it"
 	}
-	// The user-namespace mapping decides the USER too: under userns=host the deploy's own uid
-	// maps to a subuid and cannot write the host-owned bind, so the transient container runs as
-	// container root — the same mapping the emitted unit carries (engine_ops.go, podUserNSFor).
+	// The workload user is the deploy's own: no charly pod runs as container root, and under
+	// keep-id that user IS the invoking host user, so the host-owned bind stays writable. The
+	// mapping is the same one the emitted unit carries (engine_ops.go, podUserNSFor).
 	userNS := podUserNSFor(engine, gpu, security.Privileged, len(bindMounts))
 	user := fmt.Sprintf("%d:%d", uid, gid)
-	if userNS.hostRoot() {
-		user = containerRootUser
-	}
 	args := []string{
 		binary, "run", "--rm", interactiveFlag,
 		"-w", workingDir,
@@ -226,11 +223,8 @@ func buildShellArgs(target deploykit.ContainerdTarget, imageRef string, uid, gid
 			args = append(args, "-v", m)
 		}
 	}
-	switch {
-	case userNS.keepID():
+	if userNS.keepID() {
 		args = append(args, fmt.Sprintf("--userns=keep-id:uid=%d,gid=%d", uid, gid))
-	case userNS.hostRoot():
-		args = append(args, "--userns=host")
 	}
 	args = append(args, envArgs(envVars)...)
 	args = append(args, "--entrypoint", "bash", imageRef)
@@ -247,13 +241,8 @@ func buildExecArgs(target deploykit.ContainerdTarget, name string, uid, gid int,
 	if interactive {
 		interactiveFlag = "-it"
 	}
-	// An attach must use the SAME workload user the container was created with: a CDI deploy
-	// runs as container root, and demoting the attach to the deploy's uid would leave it unable
-	// to write the bind the deploy exists for.
+	// An attach uses the SAME workload user the container was created with — the deploy's own.
 	user := fmt.Sprintf("%d:%d", uid, gid)
-	if userNS.hostRoot() {
-		user = containerRootUser
-	}
 	args := []string{
 		binary, "exec", interactiveFlag,
 		"--user", user,

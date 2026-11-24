@@ -449,6 +449,11 @@ func runConfig(ctx context.Context, ex *sdk.Executor, rt *kit.ResolvedRuntime, s
 		EncryptedMounts: deploykit.HasEncryptedBindMounts(bindMounts), KeyringBackend: isKeyring,
 		PodName: podName, Sidecar: resolvedSidecars,
 	}
+	// A keep-id GPU unit needs the derived devices-only CDI spec and the driver-library binds; a
+	// no-op for every other shape (cdi_spec.go).
+	if err := applyKeepIDGPU(&qcfg, security.Privileged); err != nil {
+		return err
+	}
 
 	if quadletEnvFile != "" {
 		qcfg.Env = append([]string{}, globalEnv...)
