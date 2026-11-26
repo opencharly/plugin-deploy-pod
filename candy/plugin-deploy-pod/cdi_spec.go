@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -149,7 +150,8 @@ func deriveDevicesOnlyCDI(hostSpecPath string) ([]byte, []deploykit.ResolvedBind
 // `create-symlinks` hook would have made: the spec mounts the VERSIONED file (libcuda.so.615.78.08
 // at libcuda.so.615.78.08), and the dynamic loader asks for libcuda.so.1. The hook cannot be relied
 // on here — the derived spec drops hooks — so each host symlink that resolves to the mounted file is
-// bound as `<versioned host file> -> <its SONAME path in the container>`.
+// bound as `<the host SONAME symlink> -> <that same path in the container>`: the SOURCE is the
+// symlink, so a driver upgrade that replaces the versioned file cannot leave a dangling bind.
 func sonameBinds(hostPath, contPath string) []deploykit.ResolvedBindMount {
 	dir, base := filepath.Dir(contPath), filepath.Base(contPath)
 	stem, _, ok := strings.Cut(base, ".so")
@@ -175,8 +177,12 @@ func sonameBinds(hostPath, contPath string) []deploykit.ResolvedBindMount {
 			continue
 		}
 		out = append(out, deploykit.ResolvedBindMount{
-			Name:     strings.TrimPrefix(name, "lib"),
-			HostPath: hostPath, ContPath: filepath.Join(dir, name), ReadOnly: true,
+			Name: strings.TrimPrefix(name, "lib"),
+			// The SOURCE is the host SYMLINK (e.g. /usr/lib/libcuda.so.1), not the versioned file
+			// it points at: a driver upgrade replaces the versioned target and removes the old
+			// versioned path, so a unit bound to it fails with "no such file or directory" until
+			// it is regenerated. The SONAME symlinks survive the upgrade.
+			HostPath: filepath.Join(filepath.Dir(hostPath), name), ContPath: filepath.Join(dir, name), ReadOnly: true,
 		})
 	}
 	return out
@@ -184,12 +190,7 @@ func sonameBinds(hostPath, contPath string) []deploykit.ResolvedBindMount {
 
 // mountIsReadOnly reports whether the spec already mounts the source read-only.
 func mountIsReadOnly(opts []string) bool {
-	for _, o := range opts {
-		if o == "ro" {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(opts, "ro")
 }
 
 // writeDevicesOnlyCDI derives the spec into the charly data root and returns its directory. The

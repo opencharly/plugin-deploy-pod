@@ -96,6 +96,12 @@ containerEdits:
 		if strings.Contains(l.ContPath, "mps") {
 			t.Errorf("%s must not be bound: it is not a shared object", l.ContPath)
 		}
+		// The SONAME bind's SOURCE must be the host symlink it is named for, never the versioned
+		// file: a driver upgrade replaces the versioned target and removes the old versioned path,
+		// so a unit bound to it fails with "no such file or directory" until regenerated.
+		if strings.HasSuffix(l.ContPath, ".so.1") && l.HostPath != l.ContPath {
+			t.Errorf("the SONAME bind %q has source %q; it must bind the symlink itself", l.ContPath, l.HostPath)
+		}
 		paths = append(paths, l.ContPath)
 	}
 	wantPaths := map[string]bool{
