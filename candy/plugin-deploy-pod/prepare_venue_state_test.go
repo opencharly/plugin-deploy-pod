@@ -19,7 +19,7 @@ func TestPrepareVenueState_DecodesIntoTheHostsWireType(t *testing.T) {
 		overlay = "check-stepkind-emit-pod-overlay:0fafbf994885"
 		base    = "ghcr.io/opencharly/check-pod:2026.216.2119"
 	)
-	state := prepareVenueState(overlay, base, "", nil)
+	state := prepareVenueState(overlay, base, "check-box", nil)
 	if len(state) == 0 {
 		t.Fatal("prepareVenueState returned no state for a built overlay")
 	}
@@ -43,6 +43,37 @@ func TestPrepareVenueState_DecodesIntoTheHostsWireType(t *testing.T) {
 	}
 	if stale.ResolvedImage != "" {
 		t.Fatalf("the Go-field-name key %s now decodes to %q; if the wire contract gained that alias this test's premise is stale — re-check prepareVenueState's doc comment", handBuilt, stale.ResolvedImage)
+	}
+}
+
+// TestPrepareVenueState_OverlayOnlyPatchCarriesTheImage is the regression witness for
+// opencharly/plugin-deploy-pod#84. An add_candy overlay build with NO authored engine selector
+// used to emit {"resolved_image": …} alone: the node-form writer then produced a `pod:` body with
+// no `image:`, which ValidateDeployRequiresBox drops at load — and the degraded load makes sdk's
+// SaveDeployConfig refuse EVERY later write to the host config. The patch must carry box + target
+// whenever it is emitted, not only when an engine selector is present.
+func TestPrepareVenueState_OverlayOnlyPatchCarriesTheImage(t *testing.T) {
+	const (
+		overlay = "check-service-status-overlay:cabc723f3910"
+		base    = "ghcr.io/opencharly/check-pod:2026.328.0005"
+		box     = "check-service-status"
+	)
+	state := prepareVenueState(overlay, base, box, nil) // nil node ⇒ no authored engine selector
+	if len(state) == 0 {
+		t.Fatal("prepareVenueState returned no state for a built overlay")
+	}
+	var in spec.SaveDeployStateInput
+	if err := json.Unmarshal(state, &in); err != nil {
+		t.Fatalf("host decode of the state blob: %v", err)
+	}
+	if in.Box != box {
+		t.Fatalf("decoded Box = %q, want %q — an overlay-only patch MUST carry the image: without it the written entry has no `image:`, the loader drops it, and every later config write is refused (#84)", in.Box, box)
+	}
+	if in.Target != "pod" {
+		t.Fatalf("decoded Target = %q, want \"pod\" — the entry must classify as a pod deploy, not a targetless group", in.Target)
+	}
+	if in.ResolvedImage != overlay {
+		t.Fatalf("decoded ResolvedImage = %q, want %q", in.ResolvedImage, overlay)
 	}
 }
 

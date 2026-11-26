@@ -499,18 +499,23 @@ func prepareVenueState(resolvedImage, baseImage, box string, node *spec.Deploy) 
 		// Preserve the pre-existing no-overlay, no-selector contract: nothing to persist.
 		return nil
 	}
-	if in.Engine != "" {
-		// An engine selector can arrive with NO overlay, so give the new entry the image that
-		// makes it a complete image-backed pod entry. The node-form writer derives the `pod:`
-		// discriminator from Target or an image/workload indicator; an engine-only patch has
-		// neither, so without this the writer would emit a targetless `group:` entry and the
-		// next load would reject `engine` there (spec/deploy_nodeform.go deployDiscForEntity).
-		// An older sdk/plugin-fleet drops only the `engine` key and still writes a valid entry.
-		// applyDeployState seeds Image/Target only when the entry has none, so an existing
-		// operator value is never rewritten.
-		in.Box = box
-		in.Target = "pod"
-	}
+	// EVERY emitted patch carries the image and the target — not only the engine path.
+	// The node-form writer derives the `pod:` discriminator from Target or an image/workload
+	// indicator, and the LOADER requires `image:` on a pod entry
+	// (spec/deploy_tree_validate.go, ValidateDeployRequiresBox). An overlay-only patch written
+	// without `box` therefore produced an entry that classified as `pod` (it carries
+	// `resolved_image`) but could not load — and a degraded load then makes sdk's
+	// SaveDeployConfig refuse EVERY later write to the file ("holds N deploy entries but only M
+	// load"), which locks the operator out of `charly config` until the file is hand-edited
+	// (opencharly/plugin-deploy-pod#84).
+	// An engine selector can arrive with NO overlay, so this path needs the image for the same
+	// reason; without it the writer would emit a targetless `group:` entry and the next load
+	// would reject `engine` there (spec/deploy_nodeform.go deployDiscForEntity). An older
+	// sdk/plugin-fleet drops only the `engine` key and still writes a valid entry.
+	// applyDeployState seeds Image/Target only when the entry has none, so an existing operator
+	// value is never rewritten.
+	in.Box = box
+	in.Target = "pod"
 	state, err := json.Marshal(in)
 	if err != nil {
 		return nil
