@@ -140,6 +140,14 @@ func podStart(ctx context.Context, exec *sdk.Executor, p lifecycleParams) (*pb.I
 	if err := podContainerStart(ctx, exec, plan, sel); err != nil {
 		return nil, err
 	}
+	// The start COMMAND returning is not the container being up: systemctl --user start returns
+	// once the job is queued, and a created-but-not-running container has an empty mount
+	// namespace (start_ready.go, opencharly/charly#1301). Wait for the engine's own state before
+	// anything downstream — the declared readiness probe, the tunnel, and the caller — touches a
+	// mounted path.
+	if err := waitContainerRunning(ctx, exec, p, plan); err != nil {
+		return nil, err
+	}
 	// The container is up, but supervisord's RUNNING is only the process state: a
 	// start wrapper that is still waiting on its database is RUNNING too. Run the
 	// deploy's AUTHORED probes.readiness Op before returning, so `charly start` and

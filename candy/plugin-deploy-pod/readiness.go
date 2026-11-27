@@ -85,6 +85,16 @@ func pollReadiness(ctx context.Context, cfg poll.PollConfig, ex venueExecutor, s
 	})
 }
 
+// startEngineBin resolves the container engine binary a post-start wait execs: the host-supplied
+// lifecycle param first (it is what the host resolved for this operation), then the plan's own.
+// Empty means neither carried one, which every caller reports rather than papering over.
+func startEngineBin(p lifecycleParams, plan spec.PodLifecyclePlan) string {
+	if p.EngineBin != "" {
+		return p.EngineBin
+	}
+	return plan.EngineBin
+}
+
 // waitDeclaredReadiness runs the deploy's authored readiness probe after the
 // container starts. It is a no-op for a deploy that declares none.
 func waitDeclaredReadiness(ctx context.Context, ex venueExecutor, p lifecycleParams, plan spec.PodLifecyclePlan) error {
@@ -95,10 +105,7 @@ func waitDeclaredReadiness(ctx context.Context, ex venueExecutor, p lifecyclePar
 	if cmd == "" {
 		return nil
 	}
-	engine := p.EngineBin
-	if engine == "" {
-		engine = plan.EngineBin
-	}
+	engine := startEngineBin(p, plan)
 	if engine == "" {
 		return fmt.Errorf("readiness probe %q: the start plan carries no container engine binary", p.Name)
 	}
