@@ -20,8 +20,12 @@ import (
 // stubProject replaces the executor-backed project loader for one test.
 func stubProject(t *testing.T, uf *spec.UnifiedFile, ok bool, err error) {
 	t.Helper()
-	prevUF, prevLoad, prevConnect := loadUnifiedForBox, loadDeploy, projectConnect
-	t.Cleanup(func() { loadUnifiedForBox, loadDeploy, projectConnect = prevUF, prevLoad, prevConnect })
+	prevUF, prevLoad, prevConnect, prevLabel, prevRec := loadUnifiedForBox, loadDeploy, projectConnect, boxLabelOfRef, recordedImageOf
+	t.Cleanup(func() {
+		loadUnifiedForBox, loadDeploy, projectConnect, boxLabelOfRef, recordedImageOf = prevUF, prevLoad, prevConnect, prevLabel, prevRec
+	})
+	boxLabelOfRef = func(context.Context, *sdk.Executor, string) string { return "" }
+	recordedImageOf = func(context.Context, *sdk.Executor, string, string) string { return "" }
 	loadUnifiedForBox = func(context.Context, *sdk.Executor, string) (*spec.UnifiedFile, bool, error) {
 		return uf, ok, err
 	}
@@ -57,6 +61,30 @@ func TestResolveRebuildBoxName_InstanceQualifiedKeyUsesTheBase(t *testing.T) {
 	}
 	if got != "whisper" {
 		t.Fatalf("resolveRebuildBoxName = %q, want %q (the key's base, never the instance-qualified key)", got, "whisper")
+	}
+}
+
+// TestResolveRebuildBoxName_QualifiedRefUsesTheImageLabel is the steady-state shape measured on a
+// disposable deploy: after any successful build or `charly config`, the entry records a QUALIFIED
+// ref (`localhost/overlay-base:2026.331.1816`), so neither the bare form nor the deploy key names the
+// box. The image's own ai.opencharly.box label does.
+func TestResolveRebuildBoxName_QualifiedRefUsesTheImageLabel(t *testing.T) {
+	stubProject(t, &spec.UnifiedFile{Box: spec.BoxMap{"overlay-base": nil}}, true, nil)
+	recordedImageOf = func(context.Context, *sdk.Executor, string, string) string {
+		return "localhost/overlay-base:2026.331.1816"
+	}
+	boxLabelOfRef = func(_ context.Context, _ *sdk.Executor, ref string) string {
+		if strings.HasPrefix(ref, "localhost/") {
+			return "overlay-base"
+		}
+		return ""
+	}
+	got, err := resolveRebuildBoxName(context.Background(), nil, "pod-overlay-builder", "test")
+	if err != nil {
+		t.Fatalf("a qualified recorded ref must resolve through the image's box label: %v", err)
+	}
+	if got != "overlay-base" {
+		t.Fatalf("resolveRebuildBoxName = %q, want %q", got, "overlay-base")
 	}
 }
 

@@ -26,6 +26,7 @@ package deploypod
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/spec/spec"
@@ -35,7 +36,7 @@ import (
 // was NOT rebuilt. It never returns a name it has not confirmed: a name handed to `box build`
 // that names nothing is exactly the silent skip this closes.
 func resolveRebuildBoxName(ctx context.Context, ex *sdk.Executor, deployKey, caller string) (string, error) {
-	recorded := recordedImageForDeployKey(ctx, ex, deployKey, caller)
+	recorded := recordedImageOf(ctx, ex, deployKey, caller)
 	box, _ := spec.ParseDeployKey(deployKey)
 	// The project is resolved the SAME way deployKeyToBoxLocal does it: a box name goes through
 	// projectConnect to a DIRECTORY, and the directory is what the unified loader reads. Passing
@@ -53,11 +54,32 @@ func resolveRebuildBoxName(ctx context.Context, ex *sdk.Executor, deployKey, cal
 		_, found := uf.Box[name]
 		return found
 	}
-	if candidate, ok := rebuildBoxCandidate(recorded, box, declared); ok {
+	// A recorded ref is not a name: after any successful build or `charly config`, the entry
+	// records a QUALIFIED ref (`localhost/overlay-base:2026.331.1816`, `ghcr.io/…`), so the bare
+	// form above only covers a first-ever config. The IMAGE says which box built it — the
+	// ai.opencharly.box label, the capability contract's own mapping — so ask it rather than parse
+	// the ref (a locally re-implemented strip-registry/tag rule would duplicate deploykit's).
+	labelled := boxLabelOfRef(ctx, ex, recorded)
+	if candidate, ok := rebuildBoxCandidate(labelled, box, declared); ok {
 		return candidate, nil
 	}
 	return "", fmt.Errorf("charly update %s --build: no box to rebuild — the deploy records the image %q and this project declares no box named %q or %q, so NOTHING WAS BUILT and the deploy must not be restarted as if it had been. Build it explicitly (`charly box build <box>`) or record the box's bare name on the deploy%s",
 		deployKey, recorded, recorded, box, projectLoadNote(loadErr))
+}
+
+// boxLabelOfRef reads the ai.opencharly.box label off a recorded image ref, through the host cli
+// seam (`charly box labels <ref> --format ai.opencharly.box`). Held as a var so a test can drive
+// both the labelled and the unreadable/no-label cases without an engine. An unreadable label
+// returns "": the caller still has the deploy key to try, and a refusal says what it looked for.
+var boxLabelOfRef = func(ctx context.Context, ex *sdk.Executor, ref string) string {
+	if ref == "" {
+		return ""
+	}
+	r, err := podCli(ctx, ex, true, false, "box", "labels", ref, "--format", "ai.opencharly.box")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(r.Stdout)
 }
 
 // rebuildBoxCandidate is the ONE decision "which declared name is this rebuild's box", pure so it
@@ -79,6 +101,12 @@ func rebuildBoxCandidate(recorded, box string, declared func(string) bool) (stri
 // second lookup. The resolver falls back to the deploy KEY when no entry records an image; that
 // fallback is reported as "unknown" here rather than as a recorded ref, so the refusal names what
 // is actually known.
+// recordedImageOf is recordedImageForDeployKey behind a var, so a test can drive the qualified-ref
+// and no-recorded-image shapes without a host config.
+var recordedImageOf = func(ctx context.Context, ex *sdk.Executor, deployKey, caller string) string {
+	return recordedImageForDeployKey(ctx, ex, deployKey, caller)
+}
+
 func recordedImageForDeployKey(ctx context.Context, ex *sdk.Executor, deployKey, caller string) string {
 	resolved := resolveBaseBoxName(ctx, ex, deployKey, "", caller)
 	box, _ := spec.ParseDeployKey(deployKey)
