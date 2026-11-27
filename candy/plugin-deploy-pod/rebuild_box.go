@@ -44,11 +44,7 @@ func resolveRebuildBoxName(ctx context.Context, ex *sdk.Executor, deployKey, cal
 	loadErr := projectConnect(ctx, ex, box, &pre)
 	uf, ok := (*spec.UnifiedFile)(nil), false
 	if loadErr == nil && pre.Dir != "" {
-		var uerr error
-		uf, ok, uerr = loadUnifiedForBox(ctx, ex, pre.Dir)
-		if loadErr == nil {
-			loadErr = uerr
-		}
+		uf, ok, loadErr = loadUnifiedForBox(ctx, ex, pre.Dir)
 	}
 	declared := func(name string) bool {
 		if !ok || uf == nil || name == "" {
