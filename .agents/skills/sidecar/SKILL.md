@@ -288,7 +288,6 @@ Chrome requires large `/dev/shm`. In pod mode, per-container `ShmSize=` is ignor
 - `/charly-core:charly-config` — `--sidecar` and `--list-sidecars` flags, Provides Filtering, resource caps, NO_PROXY auto-enrichment
 - `/charly-image:layer` — `env_accept` / `env_require` authoring and the full provides filtering contract
 - `/charly-build:secrets` — `charly secrets gpg set TS_AUTHKEY` for auth key storage
-- `/charly-selkies:selkies-labwc` — Full deployment example with Tailscale exit node
 - `/charly-selkies:chrome` — Proxy deployment pattern (Tailscale exit node + HTTP_PROXY) and NO_PROXY auto-enrichment
 - `/charly-automation:enc` — Encrypted volumes in pod deployments
 
