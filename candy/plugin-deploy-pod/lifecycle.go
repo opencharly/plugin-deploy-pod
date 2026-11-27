@@ -605,11 +605,13 @@ func podLogs(ctx context.Context, exec *sdk.Executor, p lifecycleParams) (*pb.In
 // start) — the path `charly update <pod-bed>` routes through (the disposable bed's fresh-rebuild R10
 // gate). Each leg is a `charly` subcommand via the cli host-builder.
 func podRebuild(ctx context.Context, exec *sdk.Executor, p lifecycleParams) (*pb.InvokeReply, error) {
-	var ropts struct {
-		DryRun       bool   `json:"DryRun"`
-		RebuildImage bool   `json:"RebuildImage"`
-		Tag          string `json:"Tag"`
-	}
+	// Decode the CANONICAL wire shape. The hand-rolled struct this replaced declared
+	// `RebuildImage`/`DryRun`/`Tag` with no json tags while the host marshals
+	// spec.DeployTargetRebuildOpts as `rebuild_image`/`dry_run`/`tag`, so `--build` decoded to
+	// FALSE and the build leg never ran — silently, because every other leg succeeded and the
+	// command exited 0 (opencharly/charly#1297). `tag` matched case-insensitively, which is why
+	// `--tag` kept working and hid the mismatch.
+	var ropts spec.DeployTargetRebuildOpts
 	if len(p.Opts) > 0 {
 		if err := json.Unmarshal(p.Opts, &ropts); err != nil {
 			return nil, fmt.Errorf("plugin-deploy-pod rebuild: decode opts: %w", err)
@@ -619,10 +621,13 @@ func podRebuild(ctx context.Context, exec *sdk.Executor, p lifecycleParams) (*pb
 		return marshalReply(struct{}{}) // dry-run: the host proxy prints nothing for Rebuild
 	}
 	if ropts.RebuildImage {
-		// Same resolution rule as podPrepareVenue: `box build`/`check box` take a BOX name, and the
-		// lifecycle params carry the deploy KEY (a qualified bed's key is `ns/name`), never the key
-		// verbatim — opencharly/plugin-build#46.
-		baseRef := resolveBaseBoxName(ctx, exec, p.Name, p.Image, "pod rebuild")
+		// The box — confirmed to exist, or a refusal that says what was NOT rebuilt. A name the
+		// project does not declare used to reach `box build` and no-op while the restart below
+		// still ran (rebuild_box.go).
+		baseRef, err := resolveRebuildBoxName(ctx, exec, p.Name, "pod rebuild")
+		if err != nil {
+			return nil, err
+		}
 		if _, err := podCli(ctx, exec, false, false, "box", "build", baseRef); err != nil {
 			return nil, err
 		}
