@@ -20,8 +20,12 @@ import (
 // stubProject replaces the executor-backed project loader for one test.
 func stubProject(t *testing.T, uf *spec.UnifiedFile, ok bool, err error) {
 	t.Helper()
-	prevUF, prevLoad, prevConnect := loadUnifiedForBox, loadDeploy, projectConnect
-	t.Cleanup(func() { loadUnifiedForBox, loadDeploy, projectConnect = prevUF, prevLoad, prevConnect })
+	prevUF, prevLoad, prevConnect, prevLabel, prevRec := loadUnifiedForBox, loadDeploy, projectConnect, boxLabelOfRef, recordedImageOf
+	t.Cleanup(func() {
+		loadUnifiedForBox, loadDeploy, projectConnect, boxLabelOfRef, recordedImageOf = prevUF, prevLoad, prevConnect, prevLabel, prevRec
+	})
+	boxLabelOfRef = func(context.Context, *sdk.Executor, string) string { return "" }
+	recordedImageOf = func(context.Context, *sdk.Executor, string, string) string { return "" }
 	loadUnifiedForBox = func(context.Context, *sdk.Executor, string) (*spec.UnifiedFile, bool, error) {
 		return uf, ok, err
 	}
@@ -60,21 +64,49 @@ func TestResolveRebuildBoxName_InstanceQualifiedKeyUsesTheBase(t *testing.T) {
 	}
 }
 
+// TestResolveRebuildBoxName_QualifiedRefUsesTheImageLabel is the steady-state shape measured on a
+// disposable deploy: after any successful build or `charly config`, the entry records a QUALIFIED
+// ref (`localhost/overlay-base:2026.331.1816`), so neither the bare form nor the deploy key names the
+// box. The image's own ai.opencharly.box label does.
+func TestResolveRebuildBoxName_QualifiedRefUsesTheImageLabel(t *testing.T) {
+	stubProject(t, &spec.UnifiedFile{Box: spec.BoxMap{"overlay-base": nil}}, true, nil)
+	recordedImageOf = func(context.Context, *sdk.Executor, string, string) string {
+		return "localhost/overlay-base:2026.331.1816"
+	}
+	boxLabelOfRef = func(_ context.Context, _ *sdk.Executor, ref string) string {
+		if strings.HasPrefix(ref, "localhost/") {
+			return "overlay-base"
+		}
+		return ""
+	}
+	got, err := resolveRebuildBoxName(context.Background(), nil, "pod-overlay-builder", "test")
+	if err != nil {
+		t.Fatalf("a qualified recorded ref must resolve through the image's box label: %v", err)
+	}
+	if got != "overlay-base" {
+		t.Fatalf("resolveRebuildBoxName = %q, want %q", got, "overlay-base")
+	}
+}
+
 // TestRebuildBoxCandidate_BareImageNameBeatsTheKey is the bed shape: a bed's deploy key is
 // `check-whisper-pod` while its recorded image is the BARE box name `whisper`, so the key alone
 // would refuse a rebuild that has a perfectly good box.
 func TestRebuildBoxCandidate_BareImageNameBeatsTheKey(t *testing.T) {
 	declared := func(n string) bool { return n == "whisper" }
-	got, ok := rebuildBoxCandidate("whisper", "check-whisper-pod", declared)
-	if !ok || got != "whisper" {
+	// The recorded BARE name is the first candidate and needs no label read.
+	if got, ok := rebuildBoxCandidate("whisper", "", "check-whisper-pod", declared); !ok || got != "whisper" {
 		t.Fatalf("rebuildBoxCandidate = (%q,%v), want (whisper,true)", got, ok)
 	}
-	// A fully-qualified recorded ref declares nothing, so the KEY is the next candidate.
-	if got, ok := rebuildBoxCandidate("ghcr.io/opencharly/whisper:2026.325.2318", "whisper", declared); !ok || got != "whisper" {
-		t.Fatalf("rebuildBoxCandidate(fq ref) = (%q,%v), want (whisper,true)", got, ok)
+	// A qualified recorded ref declares nothing; the IMAGE'S LABEL is the next candidate.
+	if got, ok := rebuildBoxCandidate("localhost/whisper:2026.331.0001", "whisper", "check-whisper-pod", declared); !ok || got != "whisper" {
+		t.Fatalf("rebuildBoxCandidate(qualified ref) = (%q,%v), want (whisper,true) via the label", got, ok)
 	}
-	// Neither name declared: no candidate, never a guessed name.
-	if got, ok := rebuildBoxCandidate("ghcr.io/opencharly/whisper:2026.325.2318", "check-whisper-pod", declared); ok {
+	// Then the key, when the ref and its label name nothing declared.
+	if got, ok := rebuildBoxCandidate("ghcr.io/opencharly/x:1", "", "whisper", declared); !ok || got != "whisper" {
+		t.Fatalf("rebuildBoxCandidate(key fallback) = (%q,%v), want (whisper,true)", got, ok)
+	}
+	// None declared: no candidate, never a guessed name.
+	if got, ok := rebuildBoxCandidate("ghcr.io/opencharly/x:1", "y", "check-whisper-pod", declared); ok {
 		t.Fatalf("rebuildBoxCandidate must refuse when no declared name matches, got %q", got)
 	}
 }
