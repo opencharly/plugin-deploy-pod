@@ -233,7 +233,8 @@ func keepIDGPUInputs(gpu, privileged bool, bindMounts int) (string, []deploykit.
 	return dir, libs
 }
 
-// applyKeepIDGPU appends the derived spec directory and the library binds to a quadlet config.
+// applyKeepIDGPU appends the derived spec directory, the library binds and the loader path to a
+// quadlet config.
 func applyKeepIDGPU(cfg *deploykit.QuadletConfig, privileged bool) {
 	dir, libs := keepIDGPUInputs(cfg.GPU, privileged, len(cfg.BindMounts))
 	if dir == "" {
@@ -241,6 +242,67 @@ func applyKeepIDGPU(cfg *deploykit.QuadletConfig, privileged bool) {
 	}
 	cfg.PodmanArgs = append(cfg.PodmanArgs, "--cdi-spec-dir", dir)
 	cfg.BindMounts = append(cfg.BindMounts, libs...)
+	cfg.Env = prependLibraryPath(cfg.Env, libDirs(libs))
+}
+
+// libDirs returns the unique container directories the derived binds land in, in bind order.
+func libDirs(libs []deploykit.ResolvedBindMount) []string {
+	seen := map[string]bool{}
+	var dirs []string
+	for _, l := range libs {
+		d := filepath.Dir(l.ContPath)
+		if d == "" || d == "." || seen[d] {
+			continue
+		}
+		seen[d] = true
+		dirs = append(dirs, d)
+	}
+	return dirs
+}
+
+// prependLibraryPath puts the derived library directories at the FRONT of LD_LIBRARY_PATH, keeping
+// any value the image already carries. A devices-only spec drops the toolkit's hooks, so nothing
+// refreshes the loader cache at container start: MEASURED, /etc/ld.so.cache still carries its
+// image-build timestamp and holds zero libcuda entries, while the library files ARE bound at
+// /usr/lib. A consumer that resolves the driver through the cache — triton's libcuda_dirs(), which
+// reads `ldconfig -p` and falls back to LD_LIBRARY_PATH — then asserts "libcuda.so cannot found!"
+// even though direct dlopen users (torch) still work. The loader honours LD_LIBRARY_PATH, and
+// triton accepts it explicitly, so the injected directories belong on it.
+func prependLibraryPath(env []string, dirs []string) []string {
+	if len(dirs) == 0 {
+		return env
+	}
+	mine := make(map[string]bool, len(dirs))
+	for _, d := range dirs {
+		mine[d] = true
+	}
+	// Idempotent: a dir the value already carries is not added twice, so re-applying the merge
+	// (the quadlet config then the argv built from it) leaves one copy of each.
+	parts := append([]string{}, dirs...)
+	for i, e := range env {
+		if !strings.HasPrefix(e, "LD_LIBRARY_PATH=") {
+			continue
+		}
+		for _, p := range strings.Split(strings.TrimPrefix(e, "LD_LIBRARY_PATH="), ":") {
+			if p != "" && !mine[p] {
+				parts = append(parts, p)
+			}
+		}
+		out := make([]string, len(env))
+		copy(out, env)
+		out[i] = "LD_LIBRARY_PATH=" + strings.Join(parts, ":")
+		return out
+	}
+	return append(env, "LD_LIBRARY_PATH="+strings.Join(parts, ":"))
+}
+
+// keepIDGPUEnv is the env twin of keepIDGPUArgs: the loader path the derived binds need.
+func keepIDGPUEnv(env []string, gpu, privileged bool, bindMounts int) []string {
+	dir, libs := keepIDGPUInputs(gpu, privileged, bindMounts)
+	if dir == "" {
+		return env
+	}
+	return prependLibraryPath(env, libDirs(libs))
 }
 
 // keepIDGPUArgs is the argv twin of applyKeepIDGPU for the direct/systemd-unit launch and the

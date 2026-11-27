@@ -74,6 +74,13 @@ func TestKeepIDGPUInputsReachEveryEmitter(t *testing.T) {
 	if !foundRO {
 		t.Errorf("quadlet config bind mounts = %+v, want a read-only libcuda.so.1 bind", qcfg.BindMounts)
 	}
+	// The loader path, derived from the SAME binds. A devices-only spec drops the toolkit hooks, so
+	// nothing refreshes /etc/ld.so.cache at start; a cache-reading consumer (triton's
+	// libcuda_dirs) then cannot find the driver even though the file is bound — measured.
+	wantLibPath := "LD_LIBRARY_PATH=" + filepath.Dir(filepath.Join(qcfg.BindMounts[1].ContPath))
+	if !hasEnvEntry(qcfg.Env, wantLibPath) {
+		t.Errorf("quadlet config env = %v, want %q", qcfg.Env, wantLibPath)
+	}
 
 	// The three argv builders.
 	directArgv, err := directRunArgs(qcfg, binds, sel)
@@ -99,6 +106,9 @@ func TestKeepIDGPUInputsReachEveryEmitter(t *testing.T) {
 		if !hasReadOnlyBind(argv) {
 			t.Errorf("%s: no read-only library bind: %q", name, argv)
 		}
+		if !hasFlagValue(argv, "-e", wantLibPath) {
+			t.Errorf("%s: no loader path %q (a cache-reading consumer cannot find the driver): %q", name, wantLibPath, argv)
+		}
 	}
 
 	// The control: no GPU device means the stock spec stays, and nothing is added.
@@ -106,5 +116,33 @@ func TestKeepIDGPUInputsReachEveryEmitter(t *testing.T) {
 	applyKeepIDGPU(&noGPU, false)
 	if len(noGPU.PodmanArgs) != 0 || len(noGPU.BindMounts) != 1 {
 		t.Errorf("a non-GPU unit must be left untouched: args=%v binds=%+v", noGPU.PodmanArgs, noGPU.BindMounts)
+	}
+}
+
+// hasEnvEntry reports whether env carries the exact "K=V" entry.
+func hasEnvEntry(env []string, want string) bool {
+	for _, e := range env {
+		if e == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestPrependLibraryPathPreservesTheImageValue pins the merge rule: the derived directories go to
+// the FRONT and an image-provided LD_LIBRARY_PATH is kept behind them, so a unit does not lose the
+// libraries the image itself put on the path.
+func TestPrependLibraryPathPreservesTheImageValue(t *testing.T) {
+	if got := prependLibraryPath(nil, nil); len(got) != 0 {
+		t.Errorf("no directories must leave env untouched, got %v", got)
+	}
+	got := prependLibraryPath([]string{"PATH=/usr/bin", "LD_LIBRARY_PATH=/opt/lib"}, []string{"/usr/lib"})
+	want := []string{"PATH=/usr/bin", "LD_LIBRARY_PATH=/usr/lib:/opt/lib"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("prependLibraryPath = %v, want %v", got, want)
+	}
+	appended := prependLibraryPath([]string{"PATH=/usr/bin"}, []string{"/usr/lib", "/usr/lib64"})
+	if len(appended) != 2 || appended[1] != "LD_LIBRARY_PATH=/usr/lib:/usr/lib64" {
+		t.Errorf("prependLibraryPath (no existing entry) = %v", appended)
 	}
 }
