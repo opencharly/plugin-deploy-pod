@@ -323,14 +323,19 @@ check-pod-secret-diagnostic:
 
 
 # ---------------------------------------------------------------------------
-# THE R10 BED for opencharly/plugin-deploy-pod#81.
+# THE R10 BED for opencharly/plugin-deploy-pod#81 — asserting the keep-id contract it ended at.
 #
 # WHY THIS BED EXISTS: a pod deploy that carries a CDI GPU device AND a bind volume could not
 # START. `keep-id` was emitted for any bind mount, and crun cannot apply the CDI device's ~62 FILE
 # mounts inside a keep-id user namespace, so the container died at the first one
 # (`mount_setattr /usr/bin/nvidia-cuda-mps-control: Operation not permitted: OCI permission
-# denied`, exit 126). The fix: a deploy that carries the CDI device runs `userns=host` with the
-# workload as container root, and a bind-only deploy keeps `keep-id` unchanged.
+# denied`, exit 126). The first fix gave such a deploy `userns=host` with the workload as container
+# root. THE CONTRACT THAT REPLACED IT (feat/keepid-cdi-spec-v2, D-HW-10) keeps the unit ROOTLESS: it
+# runs under `keep-id` with the IMAGE USER, pointing the engine at a DERIVED devices-only CDI spec
+# (`--cdi-spec-dir`), which keeps the device nodes and drops the mounts and hooks that keep-id cannot
+# apply, recreating the driver libraries as read-only SONAME binds. This bed asserted the retired
+# `userns=host` / `User=0:0` shape until 2026-11-27 — green on a shape the plugin no longer emits,
+# and contradicting layer-cdi's rule that a bind-mounting unit runs as the image user under keep-id.
 #
 # THE SUBJECT must carry BOTH facts, so the entity is a pod deploy with a bind volume on a host
 # that has a GPU (the device is the host's own detection, not a config field) — and it must be
@@ -344,7 +349,11 @@ check-pod-secret-diagnostic:
 # ---------------------------------------------------------------------------
 pod-cdi-keepid-bind:
     pod:
-        image: ghcr.io/opencharly/arch:2026.323.1515
+        # The tag the registry actually carries: 2026.323.1515 was never published (it returns
+        # MANIFEST_UNKNOWN and the repo lists only 2026.307.1828), so charly config failed at
+        # ensure-image before this bed exercised anything (opencharly/plugin-deploy-pod#103).
+        # This bed proves the user-namespace + CDI contract, not the base's freshness.
+        image: ghcr.io/opencharly/arch:2026.307.1828
         disposable: true
         volume:
             - name: probe
@@ -368,11 +377,11 @@ check-pod-cdi-userns:
         disposable: true
         lifecycle: test
         plan:
-            - check: a pod deploy carrying a CDI GPU device and a bind volume emits userns=host with
-                  the workload as container root (never keep-id), starts, and leaves the bind writable
-                  with the file owned by the host user — and the same holds after the quadlet is
-                  destroyed and regenerated from a fresh resolve
-              id: pc-userns-host-root
+            - check: a pod deploy carrying a CDI GPU device and a bind volume emits keep-id with the
+                  image user, points at the derived devices-only CDI spec, starts, and leaves the bind
+                  writable with the file owned by the host user — and the same holds after the quadlet
+                  is destroyed and regenerated from a fresh resolve
+              id: pc-userns-keepid-user
               context: [runtime]
               timeout: 1800s
               exit_status: 0
@@ -402,6 +411,21 @@ check-pod-cdi-userns:
                     echo "== charly start rc=$startrc"
                     [ "$startrc" = "0" ] || { echo "charly start failed ($startrc) on a CDI+bind deploy"; exit 1; }
                     echo "== write the bind from INSIDE the container"
+                    # READINESS, BOUNDED, before the write: on a RESTARTED unit `charly start` returns
+                    # before the container's bind mounts are visible, so an immediate `charly cmd`
+                    # fails with "/data: No such file or directory" (measured 2026-11-27: the same cmd
+                    # succeeded a minute later; a fresh CREATE waits, a restart does not). The loop
+                    # below is a bounded readiness probe with a deadline, never a fixed sleep, and it
+                    # does not weaken the assertion: a bind that never appears still fails here.
+                    deadline=$((SECONDS + 60))
+                    until ${CHARLY_BIN} cmd "$NAME" "test -d /data" >/dev/null 2>&1; do
+                      if [ "$SECONDS" -ge "$deadline" ]; then
+                        echo "the bind's mount point did not appear inside the container within 60s" >&2
+                        ${CHARLY_BIN} cmd "$NAME" "ls -la /" >&2 2>&1 || true
+                        exit 1
+                      fi
+                      sleep 1
+                    done
                     ${CHARLY_BIN} cmd "$NAME" "touch /data/probe && ls -ln /data" > "$LOG.cmd" 2>&1; cmdrc=$?
                     grep -Ev '^plugin ' "$LOG.cmd" | tail -12 || true
                     echo "== charly cmd rc=$cmdrc"
@@ -436,13 +460,17 @@ check-pod-cdi-userns:
                     }
                     if arms >"$LOG" 2>&1; then :; else rc=$?; cat "$LOG"; exit $rc; fi
                     # THE UNIT CARRIES THE DEVICE: without it the user-namespace question is moot, and a
-                    # green "no keep-id" would prove nothing about this change.
+                    # green "keep-id" would prove nothing about this change.
                     grep -q '^AddDevice=nvidia.com/gpu=all$' "$UNIT" || { echo "the subject unit does not carry the CDI device"; cat "$LOG"; exit 1; }
-                    # AND THE MAPPING IS THE FIXED ONE, in the emitted artefact.
-                    grep -q '^UserNS=host$' "$UNIT" || { echo "the emitted unit does not run userns=host"; cat "$LOG"; exit 1; }
-                    grep -q '^User=0:0$' "$UNIT" || { echo "the emitted unit does not run the workload as container root"; cat "$LOG"; exit 1; }
-                    if grep -q '^UserNS=keep-id' "$UNIT"; then
-                      echo "the emitted unit still carries a keep-id mapping"; cat "$LOG"; exit 1; fi
+                    # AND THE MAPPING IS THE CONTRACT'S ONE, in the emitted artefact: a unit with a
+                    # bind mount runs under keep-id with the IMAGE USER, against the derived
+                    # devices-only spec. This bed asserted the retired userns=host / User=0:0 shape
+                    # until 2026-11-27, contradicting layer-cdi's rule 1 ("run as the image user under
+                    # keep-id") — it was green on the shape the plugin no longer emits.
+                    grep -q '^UserNS=keep-id:uid=1000,gid=1000$' "$UNIT" || { echo "the emitted unit does not run keep-id with the image user"; cat "$LOG"; exit 1; }
+                    grep -q '^PodmanArgs=.*--cdi-spec-dir ' "$UNIT" || { echo "the emitted unit does not point at the derived CDI spec"; cat "$LOG"; exit 1; }
+                    if grep -q '^User=0:0$' "$UNIT"; then
+                      echo "the emitted unit runs the workload as container root"; cat "$LOG"; exit 1; fi
                     # THE LOADER SEES THE INJECTED LIBRARIES. The derived devices-only spec drops the
                     # toolkit's hooks, so nothing refreshes /etc/ld.so.cache at container start; a
                     # consumer that resolves the driver through the cache (triton's libcuda_dirs,
