@@ -443,6 +443,15 @@ check-pod-cdi-userns:
                     grep -q '^User=0:0$' "$UNIT" || { echo "the emitted unit does not run the workload as container root"; cat "$LOG"; exit 1; }
                     if grep -q '^UserNS=keep-id' "$UNIT"; then
                       echo "the emitted unit still carries a keep-id mapping"; cat "$LOG"; exit 1; fi
+                    # THE LOADER SEES THE INJECTED LIBRARIES. The derived devices-only spec drops the
+                    # toolkit's hooks, so nothing refreshes /etc/ld.so.cache at container start; a
+                    # consumer that resolves the driver through the cache (triton's libcuda_dirs,
+                    # which reads `ldconfig -p` and falls back to LD_LIBRARY_PATH) then fails with
+                    # "libcuda.so cannot found!" while the library IS bound. Measured on the
+                    # qwen3-tts bed (opencharly/plugin-deploy-pod#102): 0 libcuda entries in the
+                    # cache, the files present at /usr/lib, and libcuda_dirs() returning ['/usr/lib']
+                    # once LD_LIBRARY_PATH named it. The unit must carry that path.
+                    grep -q '^Environment=LD_LIBRARY_PATH=' "$UNIT" || { echo "the emitted unit does not put the injected libraries on LD_LIBRARY_PATH"; grep -E '^Environment=' "$UNIT"; cat "$LOG"; exit 1; }
                     # THE BIND IS WRITABLE AND THE FILE IS THE HOST USER'S, after BOTH the start and the
                     # fresh rebuild (the two cmd arms above returned 0).
                     grep -q 'probe$' "$LOG.cmd" || { echo "no touch evidence from inside the container"; cat "$LOG"; exit 1; }

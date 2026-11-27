@@ -230,7 +230,7 @@ func buildShellArgs(target deploykit.ContainerdTarget, imageRef string, uid, gid
 	if userNS.keepID() {
 		args = append(args, fmt.Sprintf("--userns=keep-id:uid=%d,gid=%d", uid, gid))
 	}
-	args = append(args, envArgs(envVars)...)
+	args = append(args, envArgs(keepIDGPUEnv(envVars, gpu, security.Privileged, len(bindMounts)))...)
 	args = append(args, "--entrypoint", "bash", imageRef)
 	if command != "" {
 		args = append(args, "-c", command)
