@@ -491,3 +491,79 @@ check-pod-cdi-userns:
                     ${CHARLY_BIN} remove "$NAME" > "$LOG.rm" 2>&1 || { echo "cleanup failed"; tail -12 "$LOG.rm"; exit 1; }
                     tail -60 "$LOG"
                     echo PC-USERNS-OK
+
+# ---------------------------------------------------------------------------
+# THE R10 BED for opencharly/charly#1297 — `charly update <deploy> --build`.
+#
+# WHY THIS BED EXISTS: `--build` promised "rebuilds the artifact first" and on this
+# host built nothing while exiting 0. Two causes, both asserted here: the flag was
+# dropped by a json-tag mismatch (rebuild_image vs RebuildImage), and the build leg
+# fed the deploy's recorded IMAGE ref to `box build`.
+#
+# THE TWO ARMS are the two answers the fix can give, and each FAILS on the pre-fix
+# tree (which returned rc=0 with no build line for both):
+#   1. a disposable deploy that names NO declared box must REFUSE (rc!=0) with a
+#      message that says NOTHING WAS BUILT — never a silent restart;
+#   2. a disposable deploy whose recorded image IS a declared box must BUILD it
+#      (the build line appears), whatever the later check leg does.
+# ---------------------------------------------------------------------------
+check-pod-rebuild-build:
+    local:
+        from: pod-cdi-keepid-template
+        host: local
+        disposable: true
+        lifecycle: test
+        plan:
+            - check: a deploy that names no box the project declares REFUSES `update --build` with a
+                  message saying nothing was built, instead of exiting 0 after a restart on the old image
+              id: rebuild-refuses-a-boxless-deploy
+              context: [runtime]
+              timeout: 600s
+              exit_status: 0
+              stdout:
+                contains: REBUILD-REFUSE-OK
+              command:
+                in_container: false
+                command: |
+                    set -eu
+                    ${CHARLY_BIN} config pod-cdi-keepid-bind >/dev/null 2>&1 || { echo "config failed"; exit 1; }
+                    set +e
+                    ${CHARLY_BIN} update pod-cdi-keepid-bind --build > .check/rebuild-refuse.log 2>&1
+                    rc=$?
+                    set -e
+                    grep -v '^plugin ' .check/rebuild-refuse.log | tail -3
+                    echo "== charly update --build rc=$rc"
+                    [ "$rc" != "0" ] || { echo "a boxless deploy returned 0 from update --build"; exit 1; }
+                    grep -q 'NOTHING WAS BUILT' .check/rebuild-refuse.log || { echo "the refusal does not say nothing was built"; exit 1; }
+                    echo REBUILD-REFUSE-OK
+            - check: a deploy whose recorded image IS a declared box actually BUILDS it under
+                  `update --build` — the build line appears where the pre-fix run produced none
+              id: rebuild-builds-a-declared-box
+              context: [runtime]
+              timeout: 1800s
+              exit_status: 0
+              stdout:
+                contains: REBUILD-BUILD-OK
+              command:
+                in_container: false
+                command: |
+                    set -eu
+                    ${CHARLY_BIN} config pod-overlay-builder >/dev/null 2>&1 || { echo "config failed"; exit 1; }
+                    set +e
+                    ${CHARLY_BIN} update pod-overlay-builder --build > .check/rebuild-build.log 2>&1
+                    set -e
+                    grep -v '^plugin ' .check/rebuild-build.log | tail -6
+                    grep -q -- '--- Building overlay-base ---' .check/rebuild-build.log || { echo "update --build did not build the box it resolved"; exit 1; }
+                    echo REBUILD-BUILD-OK
+            - check: both disposable subjects are removed again, so the bed leaves nothing running
+              id: rebuild-cleaned-up
+              context: [runtime]
+              timeout: 300s
+              exit_status: 0
+              command:
+                in_container: false
+                command: |
+                    set -eu
+                    ${CHARLY_BIN} remove pod-cdi-keepid-bind >/dev/null 2>&1 || true
+                    ${CHARLY_BIN} remove pod-overlay-builder >/dev/null 2>&1 || true
+                    echo REBUILD-CLEANED-UP
