@@ -60,11 +60,11 @@ func resolveRebuildBoxName(ctx context.Context, ex *sdk.Executor, deployKey, cal
 	// ai.opencharly.box label, the capability contract's own mapping — so ask it rather than parse
 	// the ref (a locally re-implemented strip-registry/tag rule would duplicate deploykit's).
 	labelled := boxLabelOfRef(ctx, ex, recorded)
-	if candidate, ok := rebuildBoxCandidate(labelled, box, declared); ok {
+	if candidate, ok := rebuildBoxCandidate(recorded, labelled, box, declared); ok {
 		return candidate, nil
 	}
-	return "", fmt.Errorf("charly update %s --build: no box to rebuild — the deploy records the image %q and this project declares no box named %q or %q, so NOTHING WAS BUILT and the deploy must not be restarted as if it had been. Build it explicitly (`charly box build <box>`) or record the box's bare name on the deploy%s",
-		deployKey, recorded, recorded, box, projectLoadNote(loadErr))
+	return "", fmt.Errorf("charly update %s --build: no box to rebuild — the deploy records the image %q (its ai.opencharly.box label is %q) and this project declares no box named %q, %q or %q, so NOTHING WAS BUILT and the deploy must not be restarted as if it had been. Build it explicitly (`charly box build <box>`) or record the box's bare name on the deploy%s",
+		deployKey, recorded, labelled, recorded, labelled, box, projectLoadNote(loadErr))
 }
 
 // boxLabelOfRef reads the ai.opencharly.box label off a recorded image ref, through the host cli
@@ -86,12 +86,11 @@ var boxLabelOfRef = func(ctx context.Context, ex *sdk.Executor, ref string) stri
 // can be exercised without a project. The recorded bare image name comes first: a bed records
 // `image: whisper` while its deploy key is `check-whisper-pod`, so the key alone would miss the
 // box the image names.
-func rebuildBoxCandidate(recorded, box string, declared func(string) bool) (string, bool) {
-	if declared(recorded) {
-		return recorded, true
-	}
-	if declared(box) {
-		return box, true
+func rebuildBoxCandidate(recorded, labelled, box string, declared func(string) bool) (string, bool) {
+	for _, name := range []string{recorded, labelled, box} {
+		if declared(name) {
+			return name, true
+		}
 	}
 	return "", false
 }

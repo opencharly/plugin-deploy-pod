@@ -93,16 +93,20 @@ func TestResolveRebuildBoxName_QualifiedRefUsesTheImageLabel(t *testing.T) {
 // would refuse a rebuild that has a perfectly good box.
 func TestRebuildBoxCandidate_BareImageNameBeatsTheKey(t *testing.T) {
 	declared := func(n string) bool { return n == "whisper" }
-	got, ok := rebuildBoxCandidate("whisper", "check-whisper-pod", declared)
-	if !ok || got != "whisper" {
+	// The recorded BARE name is the first candidate and needs no label read.
+	if got, ok := rebuildBoxCandidate("whisper", "", "check-whisper-pod", declared); !ok || got != "whisper" {
 		t.Fatalf("rebuildBoxCandidate = (%q,%v), want (whisper,true)", got, ok)
 	}
-	// A fully-qualified recorded ref declares nothing, so the KEY is the next candidate.
-	if got, ok := rebuildBoxCandidate("ghcr.io/opencharly/whisper:2026.325.2318", "whisper", declared); !ok || got != "whisper" {
-		t.Fatalf("rebuildBoxCandidate(fq ref) = (%q,%v), want (whisper,true)", got, ok)
+	// A qualified recorded ref declares nothing; the IMAGE'S LABEL is the next candidate.
+	if got, ok := rebuildBoxCandidate("localhost/whisper:2026.331.0001", "whisper", "check-whisper-pod", declared); !ok || got != "whisper" {
+		t.Fatalf("rebuildBoxCandidate(qualified ref) = (%q,%v), want (whisper,true) via the label", got, ok)
 	}
-	// Neither name declared: no candidate, never a guessed name.
-	if got, ok := rebuildBoxCandidate("ghcr.io/opencharly/whisper:2026.325.2318", "check-whisper-pod", declared); ok {
+	// Then the key, when the ref and its label name nothing declared.
+	if got, ok := rebuildBoxCandidate("ghcr.io/opencharly/x:1", "", "whisper", declared); !ok || got != "whisper" {
+		t.Fatalf("rebuildBoxCandidate(key fallback) = (%q,%v), want (whisper,true)", got, ok)
+	}
+	// None declared: no candidate, never a guessed name.
+	if got, ok := rebuildBoxCandidate("ghcr.io/opencharly/x:1", "y", "check-whisper-pod", declared); ok {
 		t.Fatalf("rebuildBoxCandidate must refuse when no declared name matches, got %q", got)
 	}
 }
