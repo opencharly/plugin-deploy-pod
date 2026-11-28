@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/deploykit"
@@ -204,9 +205,31 @@ func deployKeyToBoxLocal(ctx context.Context, ex *sdk.Executor, dc *deploykit.De
 // label is unreachable on this path for exactly that reason, and is deleted.
 func resolveDeployImageRef(ctx context.Context, ex *sdk.Executor, deployKey, boxRef, tag string) string {
 	if kit.LooksLikeFullRef(boxRef) {
-		return kit.ResolveShellImageRef("", boxRef, tag)
+		// A deploy entry may record a FULL ref that already carries its own tag
+		// (`image: ghcr.io/opencharly/whisper:2026.325.2318`). ResolveShellImageRef APPENDS
+		// (`%s:%s`), so handing it that ref plus a new tag produced
+		// `…:2026.325.2318:2026.332.0936` and the engine refused it as an invalid reference —
+		// which is what kept a fully-qualified deploy from ever moving to a freshly built image
+		// (opencharly/charly#1323). Strip the ref's own tag/digest first, so the requested tag is
+		// what the ref ends up carrying.
+		return kit.ResolveShellImageRef("", refWithoutTag(boxRef), tag)
 	}
 	return kit.ResolveShellImageRef(projectBoxRegistry(ctx, ex, deployKey, boxRef), spec.LeafName(boxRef), tag)
+}
+
+// refWithoutTag drops a ref's digest and its tag, leaving `[registry/]repository`. The tag
+// separator is the LAST ':' only when it comes after the last '/', so a registry port
+// (`localhost:5000/repo`) is kept (opencharly/charly#1323).
+func refWithoutTag(ref string) string {
+	if i := strings.IndexByte(ref, '@'); i >= 0 {
+		ref = ref[:i]
+	}
+	if i := strings.LastIndexByte(ref, ':'); i >= 0 {
+		if j := strings.LastIndexByte(ref, '/'); i > j {
+			ref = ref[:i]
+		}
+	}
+	return ref
 }
 
 // projectBoxRegistry returns the registry the BOX BUILD prefixes for boxRef: the box's own
